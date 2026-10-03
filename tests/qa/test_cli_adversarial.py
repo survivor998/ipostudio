@@ -11,6 +11,7 @@ import ctypes
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from ctypes import wintypes
@@ -388,3 +389,22 @@ def test_doctor_fix_with_blocking_data_dir_keeps_check_names(tmp_path, monkeypat
         "config", "data-dir", "database", "logs",
     }
     assert payload["ok"] is False
+
+
+def test_doctor_tables_without_registry_fails_not_pass(tmp_path, monkeypatch):
+    """Cross-model review finding: the H-04 guided PASS keyed on a missing
+    _migrations table also blessed damaged or foreign databases that DO have
+    tables -- doctor must pass only a truly empty schema and fail loudly on
+    tables-without-registry."""
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "data").mkdir()
+    db = tmp_path / "data" / "app.db"
+    raw = sqlite3.connect(db)
+    raw.execute("CREATE TABLE app_meta (unexpected_column TEXT)")
+    raw.commit()
+    raw.close()
+    result = invoke("doctor", "--json")
+    payload = json.loads(result.output)
+    check = next(c for c in payload["checks"] if c["name"] == "database")
+    assert check["ok"] is False
+    assert "registry" in check["detail"]

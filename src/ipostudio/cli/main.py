@@ -224,7 +224,7 @@ def _check_database(repair: bool) -> CheckOutcome:
         conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            version = _count_migrations(conn)
+            version, registry, tables = _inspect_schema(conn)
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -247,9 +247,24 @@ def _check_database(repair: bool) -> CheckOutcome:
             f"sqlite failure reading {db_path}: {exc}; run `ipo doctor --fix` "
             f"or check the file is not locked by another ipostudio process",
         )
+    if not registry:
+        if tables == 0:
+            # Same guidance as a missing database: the file exists but no
+            # schema was ever applied, which doctor --fix (or starting the
+            # app) repairs.
+            return CheckOutcome(
+                "database", True,
+                f"not initialized yet ({db_path}); run with --fix or start the app",
+            )
+        return CheckOutcome(
+            "database", False,
+            f"database has tables but no migration registry ({db_path}); it "
+            f"may be corrupted or not an ipostudio database; inspect it "
+            f"manually before running `ipo doctor --fix`",
+        )
     if version == 0:
-        # Same guidance as a missing database: the file exists but no schema
-        # was ever applied, which doctor --fix (or starting the app) repairs.
+        # Registry exists but nothing was ever applied (crash between
+        # registry creation and the first migration): --fix repairs.
         return CheckOutcome(
             "database", True,
             f"not initialized yet ({db_path}); run with --fix or start the app",
@@ -259,16 +274,27 @@ def _check_database(repair: bool) -> CheckOutcome:
     )
 
 
-def _count_migrations(conn: sqlite3.Connection) -> int:
-    # An existing-but-empty database (0-byte file: what a crashed cold open
-    # leaves behind) is valid sqlite with no tables; ask sqlite_master first
-    # instead of crashing on 'no such table: _migrations' (H-04).
-    present = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_migrations'"
+def _inspect_schema(conn: sqlite3.Connection) -> tuple[int, bool, int]:
+    """Return (migration count, registry present, user table count).
+
+    An existing-but-empty database (0-byte file: what a crashed cold open
+    leaves behind) is valid sqlite with no tables; consult sqlite_master
+    instead of crashing on 'no such table: _migrations' (H-04).  The table
+    count separates "truly empty" from "has tables but no registry", which is
+    a corrupted or foreign database and must not get the guided PASS
+    (cross-model review finding)."""
+    tables = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
     ).fetchone()[0]
-    if not present:
-        return 0
-    return conn.execute("SELECT COUNT(*) FROM _migrations").fetchone()[0]
+    registry = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type = 'table' AND name = '_migrations'"
+    ).fetchone()[0]
+    if not registry:
+        return 0, False, tables
+    version = conn.execute("SELECT COUNT(*) FROM _migrations").fetchone()[0]
+    return version, True, tables
 
 
 def _check_logs(repair: bool) -> CheckOutcome:
