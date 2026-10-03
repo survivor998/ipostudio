@@ -192,6 +192,9 @@ def test_doctor_garbage_db_guided_failure_exit_1(tmp_path, monkeypatch):
     assert "Traceback" not in text.output
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="CreateFileW exclusive-lock probe is Windows-only"
+)
 def test_doctor_exclusively_locked_db_structured_no_crash(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     db = tmp_path / "data" / "app.db"
