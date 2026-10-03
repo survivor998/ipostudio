@@ -247,12 +247,27 @@ def _check_database(repair: bool) -> CheckOutcome:
             f"sqlite failure reading {db_path}: {exc}; run `ipo doctor --fix` "
             f"or check the file is not locked by another ipostudio process",
         )
+    if version == 0:
+        # Same guidance as a missing database: the file exists but no schema
+        # was ever applied, which doctor --fix (or starting the app) repairs.
+        return CheckOutcome(
+            "database", True,
+            f"not initialized yet ({db_path}); run with --fix or start the app",
+        )
     return CheckOutcome(
         "database", True, f"schema at migration count {version} ({db_path})"
     )
 
 
 def _count_migrations(conn: sqlite3.Connection) -> int:
+    # An existing-but-empty database (0-byte file: what a crashed cold open
+    # leaves behind) is valid sqlite with no tables; ask sqlite_master first
+    # instead of crashing on 'no such table: _migrations' (H-04).
+    present = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_migrations'"
+    ).fetchone()[0]
+    if not present:
+        return 0
     return conn.execute("SELECT COUNT(*) FROM _migrations").fetchone()[0]
 
 

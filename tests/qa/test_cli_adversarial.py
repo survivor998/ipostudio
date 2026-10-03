@@ -354,3 +354,18 @@ def test_doctor_database_success_detail_names_db_path(tmp_path, monkeypatch):
     check = next(c for c in payload["checks"] if c["name"] == "database")
     assert check["ok"] is True
     assert str(db) in check["detail"]
+
+
+def test_doctor_zero_byte_db_guided_pass(tmp_path, monkeypatch):
+    """Regression H-04: a 0-byte app.db is a valid empty sqlite database
+    (exactly what a crashed cold open leaves); doctor must give it the same
+    guided PASS as a missing db, not a hard FAIL on 'no such table'."""
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "app.db").write_bytes(b"")
+    result = invoke("doctor", "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    check = next(c for c in payload["checks"] if c["name"] == "database")
+    assert check["ok"] is True
+    assert "not initialized" in check["detail"]
