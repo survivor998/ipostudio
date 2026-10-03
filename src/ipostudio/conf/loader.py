@@ -145,6 +145,11 @@ def load_config(
         try:
             flat[key] = _coerce_env(raw_key, raw_value, _annotation(FLAT_KEYS[key], key))
             origin[key] = raw_key
+        except ConfigError as exc:
+            # _coerce_env's bool branch reports through ConfigError with a
+            # ready-made detail; accumulate it like the ValueError branch so
+            # one bad variable no longer hides the others (QA-A-01)
+            details.extend(exc.details)
         except ValueError as exc:
             details.append(
                 f"{raw_key}: cannot convert {raw_value!r} ({exc}); "

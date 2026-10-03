@@ -130,8 +130,9 @@ def test_env_coercion_whitespace_empty_and_none_semantics(tmp_path):
 
 def test_env_errors_accumulate_attribute_and_short_circuit(tmp_path):
     """Multiple bad env vars accumulate details naming the env var; unknown
-    env keys are always fatal; an invalid bool short-circuits and discards
-    the details accumulated so far; origin attribution names env var vs file."""
+    env keys are always fatal; env coercion errors (bool or numeric) and
+    file-side unknown keys accumulate instead of discarding each other;
+    origin attribution names env var vs file."""
     cfg = tmp_path / "settings.toml"
     with pytest.raises(ConfigError) as multi:
         load_config(
@@ -149,14 +150,24 @@ def test_env_errors_accumulate_attribute_and_short_circuit(tmp_path):
     assert any("unknown environment key: IPO_DOWNLOADS" in d for d in details)
     assert any("unknown environment key: IPO_UNKNOWN_THING" in d for d in details)
 
-    # observed behavior: invalid bool raises immediately, dropping the
-    # already-accumulated IPO_SERVER_PORT detail (only 1 detail survives)
+    # QA-A-01 regression: an invalid bool used to raise immediately, dropping
+    # the already-accumulated IPO_SERVER_PORT detail — it now accumulates
     with pytest.raises(ConfigError) as short:
         load_config(
             base_env(cfg) | {"IPO_SERVER_PORT": "notanint", "IPO_AUTO_START_SERVER": "maybe"}
         )
-    assert len(short.value.details) == 1
+    assert len(short.value.details) == 2
     assert "expected a boolean" in short.value.details[0]
+    assert "IPO_SERVER_PORT" in short.value.details[1]
+
+    # ...and file-side unknown keys still surface alongside env coercion
+    # errors instead of being skipped by an early raise
+    cfg.write_text("bogus_key = 1\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as mixed:
+        load_config(base_env(cfg) | {"IPO_AUTO_START_SERVER": "maybe"})
+    assert any("expected a boolean" in d for d in mixed.value.details)
+    assert any("bogus_key" in d for d in mixed.value.details)
+    cfg.write_text("", encoding="utf-8")
 
     # origin attribution: env-sourced range failure names the env var,
     # file-sourced one names the file path
