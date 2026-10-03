@@ -8,3 +8,4 @@ dist/
 .venv/
 .superpowers/
 Functional Specification v1.0.md
+.gstack/
