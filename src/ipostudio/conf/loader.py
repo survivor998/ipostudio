@@ -88,7 +88,9 @@ def _coerce_env(raw_key: str, raw_value: str, ann: Any) -> Any:
 
             return [str(item) for item in json.loads(text)]
         return [part.strip() for part in raw_value.split(",") if part.strip()]
-    return raw_value
+    # shell-transplanted values carry stray padding; every scalar branch
+    # strips, and so does the string branch (QA-A-02)
+    return raw_value.strip()
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

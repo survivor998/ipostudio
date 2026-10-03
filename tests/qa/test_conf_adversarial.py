@@ -119,13 +119,13 @@ def test_env_coercion_whitespace_empty_and_none_semantics(tmp_path):
         load_config(base_env(cfg) | {"IPO_SERVER_CTX_SIZE": "8192.0"})
     assert "cannot convert" in str(float_int.value)
 
-    # observed behavior: plain str values are NOT stripped (padding kept),
-    # while a padded word fails a Literal field
+    # QA-A-02 regression: string env values are whitespace-stripped like the
+    # numeric/bool branches, so shell padding no longer leaks into values nor
+    # breaks Literal fields
     padded = load_config(base_env(cfg) | {"IPO_SERVER_HOST": " 0.0.0.0 "})
-    assert padded.general.server_host == " 0.0.0.0 "
-    with pytest.raises(ConfigError) as padded_literal:
-        load_config(base_env(cfg) | {"IPO_UI_THEME": " dark "})
-    assert "ui_theme" in str(padded_literal.value)
+    assert padded.general.server_host == "0.0.0.0"
+    themed = load_config(base_env(cfg) | {"IPO_UI_THEME": " dark "})
+    assert themed.ui.ui_theme == "dark"
 
 
 def test_env_errors_accumulate_attribute_and_short_circuit(tmp_path):
