@@ -127,8 +127,13 @@ def load_config(
     config_path = resolve_config_path(env)
     flat: dict[str, Any] = _read_toml(config_path)
     file_version = flat.get("config_version", _SCHEMA_CONFIG_VERSION)
+    # (int, float), not int: TOML 2.0 parses a bare "2.0" as float, and the
+    # int-only gate let a float version fall through to fatal unknown-key
+    # handling instead of the warn-and-keep rollback path (H-06).  Pydantic
+    # would coerce 2.0 -> 2 anyway, so the gate was the only thing treating
+    # it as "same build".
     from_newer_build = (
-        isinstance(file_version, int) and file_version > _SCHEMA_CONFIG_VERSION
+        isinstance(file_version, (int, float)) and file_version > _SCHEMA_CONFIG_VERSION
     )
 
     details: list[str] = []

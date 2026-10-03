@@ -629,3 +629,19 @@ def test_save_fsyncs_temp_file_before_replace(tmp_path, monkeypatch):
     store.set("server_port", 18081)
     store.save()
     assert order == ["fsync", "replace"]
+
+
+def test_float_config_version_still_triggers_forward_compat(tmp_path):
+    """Regression H-06: config_version = 2.0 defeated the isinstance(int)
+    gate, so unknown keys in a newer-build file became FATAL instead of
+    warn-and-keep, silently disabling the rollback safety net."""
+    cfg = tmp_path / "settings.toml"
+    cfg.write_text("config_version = 2.0\nfuture_key = 1\n", encoding="utf-8")
+    warnings: list[str] = []
+    config = load_config(base_env(cfg), warnings)
+    assert any("newer ipostudio" in w for w in warnings)
+    store = ConfigStore(cfg, config)
+    store.set("server_port", 18081)
+    store.save()
+    data = tomllib.loads(cfg.read_text(encoding="utf-8"))
+    assert data["future_key"] == 1
