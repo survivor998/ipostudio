@@ -1,0 +1,325 @@
+"""Load settings.toml and apply IPO_* environment overrides (ADR-003).
+
+Precedence: environment variable > TOML file > schema default.
+TOML files are flat (no sections): ``server_port = 18080``.
+Environment lists are comma-separated; the literal ``none`` clears optional fields.
+
+Error-message contract (DX review): every ConfigError detail names the offending
+key, the controlling file/env var, and a remediation clause. Files written by a
+newer build (higher config_version) drop unknown keys with a warning instead of
+failing, so rollback after auto-update never bricks the config.
+"""
+
+import difflib
+import os
+import re
+import tomllib
+import types
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Self, Union, get_args, get_origin
+
+import tomli_w
+from pydantic import ValidationError
+
+from ipostudio.conf.paths import BOOTSTRAP_ENV, resolve_config_path
+from ipostudio.conf.schema import FAMILIES, FLAT_KEYS, AppConfig
+
+_TRUE_WORDS = {"1", "true", "yes", "on"}
+_FALSE_WORDS = {"0", "false", "no", "off"}
+
+
+class ConfigError(Exception):
+    """Raised for unreadable, unknown or invalid configuration input."""
+
+    def __init__(self, details: list[str]) -> None:
+        self.details = details
+        super().__init__("; ".join(details))
+
+
+def _annotation(family: str, key: str) -> Any:
+    return FAMILIES[family].model_fields[key].annotation
+
+
+def _is_optional(ann: Any) -> bool:
+    # PEP 604 unions (``str | None`` as written in schema.py) have origin
+    # ``types.UnionType`` on CPython 3.10+; typing.Union covers Optional[...] form.
+    return get_origin(ann) in (Union, types.UnionType) and type(None) in get_args(ann)
+
+
+def _strip_optional(ann: Any) -> Any:
+    if _is_optional(ann):
+        args = [a for a in get_args(ann) if a is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return ann
+
+
+def _suggest(key: str) -> str:
+    close = difflib.get_close_matches(key, FLAT_KEYS, n=1, cutoff=0.6)
+    return f"; did you mean {close[0]!r}?" if close else ""
+
+
+def _coerce_env(raw_key: str, raw_value: str, ann: Any) -> Any:
+    if _is_optional(ann) and raw_value.strip().lower() in {"", "none", "null"}:
+        return None
+    ann = _strip_optional(ann)
+    origin = get_origin(ann)
+    if ann is bool:
+        lowered = raw_value.strip().lower()
+        if lowered in _TRUE_WORDS:
+            return True
+        if lowered in _FALSE_WORDS:
+            return False
+        raise ConfigError(
+            [(f"{raw_key}: expected a boolean (true/false/1/0), got {raw_value!r}; "
+             f"fix the environment variable or unset it")]
+        )
+    if ann is int:
+        return int(raw_value.strip())
+    if ann is float:
+        return float(raw_value.strip())
+    if origin is list:
+        # unambiguous encoding first: a JSON array keeps commas inside values
+        # (engine extra args) intact; bare comma-split stays as legacy form.
+        text = raw_value.strip()
+        if text.startswith("["):
+            import json
+
+            return [str(item) for item in json.loads(text)]
+        return [part.strip() for part in raw_value.split(",") if part.strip()]
+    return raw_value
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(
+            [(f"cannot read settings file {path}: {exc}; "
+             f"check file permissions, then re-run or delete the file to regenerate defaults")]
+        ) from exc
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(
+            [(f"settings file is not valid UTF-8 TOML ({path}): {exc}; "
+             f"fix or delete the offending line, or restore the file from a backup")]
+        ) from exc
+    if not isinstance(data, dict):
+        raise ConfigError([f"settings file must be a table ({path})"])
+    return data
+
+
+_SCHEMA_CONFIG_VERSION = 1
+
+
+def load_config(
+    env: Mapping[str, str] | None = None,
+    warnings: list[str] | None = None,
+) -> AppConfig:
+    """Load settings; ``warnings`` (if given) receives non-fatal notices."""
+    env = os.environ if env is None else env
+    config_path = resolve_config_path(env)
+    flat: dict[str, Any] = _read_toml(config_path)
+    file_version = flat.get("config_version", _SCHEMA_CONFIG_VERSION)
+    from_newer_build = (
+        isinstance(file_version, int) and file_version > _SCHEMA_CONFIG_VERSION
+    )
+
+    details: list[str] = []
+    origin: dict[str, str] = {}  # key -> env var name or the file path (error attribution)
+    for raw_key, raw_value in sorted(env.items()):
+        if not raw_key.startswith("IPO_") or raw_key in BOOTSTRAP_ENV:
+            continue
+        key = raw_key[len("IPO_"):].lower()
+        if key not in FLAT_KEYS:
+            # env vars come from the CURRENT shell, not a newer file: always fatal
+            details.append(
+                f"unknown environment key: {raw_key}{_suggest(key)}; "
+                f"unset it or correct the spelling in your shell"
+            )
+            continue
+        try:
+            flat[key] = _coerce_env(raw_key, raw_value, _annotation(FLAT_KEYS[key], key))
+            origin[key] = raw_key
+        except ValueError as exc:
+            details.append(
+                f"{raw_key}: cannot convert {raw_value!r} ({exc}); "
+                f"fix the value in your shell environment"
+            )
+
+    for key in flat:
+        origin.setdefault(key, str(config_path))
+
+    unknown = [key for key in flat if key not in FLAT_KEYS]
+    if from_newer_build:
+        for key in unknown:
+            warnings_append = (
+                f"ignored key {key!r} written by a newer ipostudio "
+                f"(config_version={file_version}); it will be preserved by nothing "
+                f"and re-recognised after you upgrade back"
+            )
+            if warnings is not None:
+                warnings.append(warnings_append)
+            else:
+                import logging
+
+                logging.getLogger("ipostudio").warning(warnings_append)
+        for key in unknown:  # drop before grouping; grouping indexes FLAT_KEYS
+            del flat[key]
+    else:
+        for key in unknown:
+            details.append(
+                f"unknown config key: {key} (in {config_path}){_suggest(key)}; "
+                f"remove the line, fix the spelling, or upgrade ipostudio"
+            )
+    if details:
+        raise ConfigError(details)
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for key, value in flat.items():
+        grouped.setdefault(FLAT_KEYS[key], {})[key] = value
+    try:
+        return AppConfig(**grouped)
+    except ValidationError as exc:
+        raise ConfigError(
+            [
+                f"{'.'.join(str(part) for part in error['loc'][:2])} "
+                f"(from {origin.get(str(error['loc'][1]) if len(error['loc']) > 1 else '?', str(config_path))}): "
+                f"{error['msg']}; fix the value at its origin or remove it to use the default"
+                for error in exc.errors()
+            ]
+        ) from exc
+
+
+# Credential-shaped keys are never written to disk by ConfigStore: they are
+# env-only until the P4 encrypted secret store lands (architecture.md secrets
+# boundary; CEO review consensus). Hand-written file values still load for
+# local experimentation, but save() scrubs them.
+CREDENTIAL_KEYS = frozenset({"vllm_api_key", "embedding_api_key", "gateway_api_key"})
+
+
+# any string value containing an inline URL credential is rejected regardless
+# of key name (proxy_url, engine extra args, future keys) — eng review: the
+# three-key name blacklist alone cannot uphold "credentials never on disk".
+_URL_CREDENTIAL_PATTERN = re.compile(r"(?i)://[^/\s:@]+:[^/\s@]+@")
+
+
+class ConfigStore:
+    """Validating, locked, dirty-key atomic writer for the active settings file.
+
+    - ``set(key, value)`` checks policy (credential keys, URL-embedded
+      credentials) FIRST, then validates the value on a candidate copy and only
+      then mutates self.config — rejected calls leave memory byte-identical.
+    - All rejections raise ConfigError (single error surface for callers).
+    - save() holds a cross-process advisory lock around read-merge-replace so
+      concurrent writers serialize instead of losing each other's keys.
+    - Only explicitly set keys are written; credential keys are scrubbed from
+      the merged output; environment overrides are never baked into the file.
+    - The temp file is unique per process and removed on failure.
+    """
+
+    def __init__(self, path: Path, config: AppConfig) -> None:
+        self.path = path
+        self.config = config
+        self._dirty: set[tuple[str, str]] = set()
+
+    def set(self, key: str, value: Any) -> None:
+        if key not in FLAT_KEYS:
+            raise ConfigError([(f"unknown config key: {key}{_suggest(key)}; "
+                               f"check the spelling against `ipo guide`")])
+        if key in CREDENTIAL_KEYS:
+            raise ConfigError(
+                [(f"{key} is credential-shaped and never persisted; "
+                 f"pass it via the environment (IPO_{key.upper()}) until the "
+                 f"encrypted secret store lands (P4)")]
+            )
+        if isinstance(value, str) and _URL_CREDENTIAL_PATTERN.search(value):
+            raise ConfigError(
+                [(f"{key}: value contains an inline URL credential "
+                 f"(user:password@host); move the credential to an "
+                 f"IPO_-prefixed environment variable instead")]
+            )
+        family = FLAT_KEYS[key]
+        section = getattr(self.config, family)
+        candidate = section.model_dump()
+        candidate[key] = value
+        try:
+            validated = FAMILIES[family].model_validate(candidate)
+        except ValidationError as exc:
+            raise ConfigError(
+                [(f"{family}.{key}: {exc.errors()[0]['msg']}; "
+                 f"choose a value matching the documented range/type")]
+            ) from exc
+        setattr(section, key, getattr(validated, key))  # normalized value
+        self._dirty.add((family, key))
+
+    def save(self) -> Path:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with _advisory_lock(lock_path):
+            merged: dict[str, Any] = dict(_read_toml(self.path))
+            for key in CREDENTIAL_KEYS:
+                merged.pop(key, None)
+            for family, key in self._dirty:
+                value = getattr(getattr(self.config, family), key)
+                if value is None:
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
+            fd, temp_name = _mkstemp_in(self.path.parent)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    tomli_w.dump(merged, handle)
+                os.replace(temp_name, self.path)
+            except OSError as exc:
+                Path(temp_name).unlink(missing_ok=True)
+                raise ConfigError(
+                    [(f"cannot write settings file {self.path}: {exc}; "
+                     f"check permissions and whether another process holds the "
+                     f"file open, then retry")]
+                ) from exc
+        self._dirty.clear()
+        return self.path
+
+
+def _mkstemp_in(directory: Path) -> tuple[int, str]:
+    import tempfile
+
+    return tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
+
+
+class _advisory_lock:
+    """Portable cross-process mutex via O_CREAT|O_EXCL lock file with timeout."""
+
+    def __init__(self, path: Path, timeout_seconds: float = 5.0) -> None:
+        self.path = path
+        self.timeout = timeout_seconds
+        self.held = False
+
+    def __enter__(self) -> Self:
+        import time
+
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                self.held = True
+                return self
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise ConfigError(
+                        [(f"settings file is locked by another process "
+                         f"({self.path}); wait for it to finish or remove a "
+                         f"stale lock after confirming no ipostudio process runs")]
+                    )
+                time.sleep(0.05)
+
+    def __exit__(self, *exc: object) -> None:
+        if self.held:
+            os.close(self.fd)
+            self.path.unlink(missing_ok=True)
+            self.held = False
