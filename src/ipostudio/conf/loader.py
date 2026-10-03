@@ -24,6 +24,7 @@ from pydantic import ValidationError
 
 from ipostudio.conf.paths import BOOTSTRAP_ENV, resolve_config_path
 from ipostudio.conf.schema import FAMILIES, FLAT_KEYS, AppConfig
+from ipostudio.logs import redact_unambiguous
 
 _TRUE_WORDS = {"1", "true", "yes", "on"}
 _FALSE_WORDS = {"0", "false", "no", "off"}
@@ -33,8 +34,12 @@ class ConfigError(Exception):
     """Raised for unreadable, unknown or invalid configuration input."""
 
     def __init__(self, details: list[str]) -> None:
-        self.details = details
-        super().__init__("; ".join(details))
+        # Details echo raw input values and doctor/CLI print them to stdout
+        # and --json -- outside the logging redactor.  Mask unambiguous secret
+        # shapes here, at the single construction surface, without letting the
+        # generic key=value family corrupt prose diagnostics.
+        self.details = [redact_unambiguous(detail) for detail in details]
+        super().__init__("; ".join(self.details))
 
 
 def _annotation(family: str, key: str) -> Any:

@@ -48,6 +48,18 @@ def redaction_count() -> int:
     return _masked_total
 
 
+def redact_unambiguous(text: str) -> str:
+    """Mask only unambiguous secret shapes (Bearer tokens, ``sk-`` tokens,
+    URL-embedded credentials) -- for error output that bypasses the logging
+    pipeline.  The generic ``key=value`` family fires on prose like
+    ``unknown environment key: IPO_X`` and would corrupt diagnostics there."""
+    text = _BEARER.sub(lambda m: f"{m.group(0).split()[0]} {_MASK}", text)
+    text = _LONG_TOKEN.sub(_MASK, text)
+    return _URL_CREDENTIAL.sub(
+        lambda m: f"{m.group(1)}{_MASK}:{_MASK}{m.group(4)}", text
+    )
+
+
 def redact_text(text: str) -> str:
     """Mask credential-looking values; returns the scrubbed text.
 

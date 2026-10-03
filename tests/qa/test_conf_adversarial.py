@@ -683,3 +683,16 @@ def test_save_cleans_temp_file_when_dump_raises_non_oserror(tmp_path, monkeypatc
         store.save()
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith(".settings-")]
     assert leftovers == [], f"temp files leaked: {leftovers}"
+
+
+def test_config_error_details_redact_credential_shaped_values():
+    """Cross-model review: ConfigError details echo raw values verbatim and
+    doctor/CLI print them to stdout/--json -- outside the logging redactor.
+    Masking at the single construction surface closes that side channel."""
+    err = ConfigError(['server_port: cannot convert api_key = "sk-tail12345"'])
+    assert "sk-tail12345" not in str(err)
+    assert "sk-tail12345" not in err.details[0]
+    assert "***" in err.details[0]
+    # non-credential diagnostics survive untouched
+    plain = ConfigError(["IPO_SERVER_PORT: cannot convert 'notanint'"])
+    assert "notanint" in plain.details[0]
