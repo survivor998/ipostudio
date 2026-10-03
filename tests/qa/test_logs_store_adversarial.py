@@ -458,3 +458,22 @@ def test_open_db_survives_simultaneous_cold_open_wal_race(tmp_path):
         for th in threads:
             th.join(timeout=30)
         assert errors == [], f"round {round_no}: {errors}"
+
+
+def test_redact_escaped_quotes_and_line_local_multiline():
+    """Cross-model review finding: JSON-serialized values with escaped quotes
+    ({"api_key": "abc\\"def"}) leak the tail past the mask because \\" reads
+    as a closing quote; an unclosed quote also swallowed subsequent traceback
+    lines up to the next quote anywhere in the text.  Quoted matching must be
+    escape-aware AND line-local."""
+    out = redact_text('{"api_key": "abc\\"def"} rest survives')
+    assert out == '{"api_key": *** rest survives'
+    single = redact_text("'password': 'ab\\'cd' tail")
+    assert "cd" not in single  # escaped apostrophe is not a closing quote
+    assert single.endswith(" tail")
+    # unclosed quote on a traceback line: mask the token, keep every later line
+    tb = 'self.key = "unclosed-value\n  file.py:10 x = combine("a", "b")\n  final diagnostic'
+    out_tb = redact_text(tb)
+    assert "unclosed-value" not in out_tb
+    assert 'x = combine("a", "b")' in out_tb
+    assert "final diagnostic" in out_tb

@@ -19,16 +19,21 @@ LOG_FILE_NAME = "ipostudio.log"
 #   boundary rightly forbids starting mid-word after "_");
 # - the separator tolerates the closing quote (single or double) of
 #   JSON/Python-style keys ("api_key": or 'password':).
-# The value group takes a fully quoted string (single or double) before the
-# bare-token fallback: \\S+ alone stops at the first space and leaked the tail
-# of quoted secrets ("api_key = "alpha beta gamma"" kept " beta gamma"").
+# The value group takes a quoted string before the bare-token fallback.
+# It must be ESCAPE-AWARE (\\" inside a JSON-serialized value is not a closing
+# quote: {"api_key": "abc\\"def"} used to leak def"}, the exact leak class
+# H-01 closed), LINE-LOCAL (the class excludes \\n, so an unterminated quote
+# in a multi-line traceback falls back to the bare token instead of swallowing
+# every line up to the next quote), and it consumes a glued non-space tail
+# after the closing quote ("abc"def masks whole) so masking is never weaker
+# than the old bare \\S+ fallback.
 _SECRET_KEY_VALUE = re.compile(
     r"(?i)(?<![A-Za-z0-9_-])"
     r"((?:[a-z0-9_-]*token)|(?:[a-z0-9_-]*api[_-]?key)|(?:[a-z0-9_-]*secret)|"
     r"(?:[a-z0-9_-]*password)|(?:authorization)|(?:credential)|key)"
     r"(?![A-Za-z0-9_-])(\s*"
     r"['\"]?\s*[=:]\s*)"
-    r'("[^"]*"|\'[^\']*\'|\S+)'
+    r'("(?:[^"\\\n]|\\.)*"[^\s]*|\'(?:[^\'\\\n]|\\.)*\'[^\s]*|\S+)'
 )
 # credentials embedded in URLs: http://user:password@host
 _URL_CREDENTIAL = re.compile(r"(?i)(://)([^/\s:@]+):([^/\s@]+)(@)")
