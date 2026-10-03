@@ -294,6 +294,11 @@ class ConfigStore:
             try:
                 with os.fdopen(fd, "wb") as handle:
                     tomli_w.dump(merged, handle)
+                    # durable atomic save: the data must reach the disk before
+                    # the rename, or power loss can persist os.replace with an
+                    # empty/truncated settings file (H-02)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.replace(temp_name, self.path)
             except OSError as exc:
                 Path(temp_name).unlink(missing_ok=True)

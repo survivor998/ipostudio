@@ -604,3 +604,28 @@ def test_paths_whitespace_overrides_fallback_and_layout(tmp_path):
     cfg.write_text('server_host = "bootstrap-ok"\n', encoding="utf-8")
     config = load_config({"IPO_CONFIG": str(cfg), "IPO_DATA_DIR": str(tmp_path)})
     assert config.general.server_host == "bootstrap-ok"
+
+
+def test_save_fsyncs_temp_file_before_replace(tmp_path, monkeypatch):
+    """Regression H-02: the temp file must hit the disk (fsync) BEFORE
+    os.replace, or a power loss can persist the rename with empty/truncated
+    settings.toml (LWN 457667)."""
+    from ipostudio.conf import loader as loader_mod
+
+    order = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+    monkeypatch.setattr(
+        loader_mod.os, "fsync",
+        lambda fd: (order.append("fsync"), real_fsync(fd))[1],
+    )
+    monkeypatch.setattr(
+        loader_mod.os, "replace",
+        lambda src, dst: (order.append("replace"), real_replace(src, dst))[1],
+    )
+    cfg = tmp_path / "settings.toml"
+    config = load_config(base_env(cfg))
+    store = ConfigStore(cfg, config)
+    store.set("server_port", 18081)
+    store.save()
+    assert order == ["fsync", "replace"]
