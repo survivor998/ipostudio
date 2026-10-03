@@ -98,3 +98,72 @@ def test_doctor_json_structure(tmp_path, monkeypatch):
     assert payload["ok"] is True
     names = {c["name"] for c in payload["checks"]}
     assert {"config", "data-dir", "database", "logs"} <= names
+
+
+def _make_wal_db(db_path):
+    """Create a real WAL database exactly the way the app does (open_db pins
+    journal_mode=WAL) and clean-close it, which removes the side files."""
+    from ipostudio.store.database import migrate, open_db
+
+    conn = open_db(db_path)
+    try:
+        migrate(conn)
+    finally:
+        conn.close()
+
+
+def test_doctor_readonly_inspection_leaves_no_wal_side_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    db = tmp_path / "data" / "app.db"
+    _make_wal_db(db)  # clean close: no -wal/-shm exist from here on
+    before = {p.name for p in db.parent.iterdir()}
+    result = invoke("doctor")
+    assert result.exit_code == 0
+    assert "schema at migration count" in result.output  # inspection succeeded
+    after = {p.name for p in db.parent.iterdir()}
+    assert after - before == set(), f"doctor created files: {after - before}"
+    assert not any(name.endswith(("-wal", "-shm")) for name in after)
+
+
+def test_doctor_readonly_keeps_existing_wal_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    db = tmp_path / "data" / "app.db"
+    _make_wal_db(db)
+    (db.parent / "app.db-wal").write_bytes(b"")  # simulate a live-writer sidecar
+    result = invoke("doctor")
+    assert result.exit_code == 0
+    assert "[PASS]" in result.output
+    assert (db.parent / "app.db-wal").exists()  # doctor never deletes side files
+
+
+def test_doctor_cantopen_degrades_to_guided_pass(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("IPO_DB_PATH", str(tmp_path))  # a DIRECTORY, not a database
+    result = invoke("doctor")
+    assert result.exit_code == 0  # degraded PASS, not FAIL
+    assert "[FAIL]" not in result.output
+    assert "cannot inspect read-only" in result.output
+    assert str(tmp_path) in result.output  # origin path in the note
+    assert "doctor --fix" in result.output  # with guidance
+
+
+def test_doctor_fix_failure_detail_names_db_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    db = tmp_path / "junk.db"
+    db.write_text("this is not a sqlite database", encoding="utf-8")
+    monkeypatch.setenv("IPO_DB_PATH", str(db))
+    result = invoke("doctor", "--fix")
+    assert result.exit_code == 1
+    assert "[FAIL] database" in result.output
+    assert str(db) in result.output  # error contract: origin path in detail
+
+
+def test_doctor_readonly_failure_detail_names_db_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    db = tmp_path / "junk.db"
+    db.write_text("this is not a sqlite database", encoding="utf-8")
+    monkeypatch.setenv("IPO_DB_PATH", str(db))
+    result = invoke("doctor")
+    assert result.exit_code == 1
+    assert "[FAIL] database" in result.output
+    assert str(db) in result.output  # error contract: origin path in detail

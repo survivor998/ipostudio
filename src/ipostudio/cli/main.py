@@ -190,8 +190,8 @@ def _check_database(repair: bool) -> CheckOutcome:
         except sqlite3.Error as exc:
             return CheckOutcome(
                 "database", False,
-                f"migration failed: {exc}; the failed migration was rolled "
-                f"back; fix the reported cause and re-run",
+                f"migration failed: {exc} (database {db_path}); the failed "
+                f"migration was rolled back; fix the reported cause and re-run",
             )
         return CheckOutcome("database", True, f"schema up to date at {db_path}")
     if not db_path.exists():
@@ -204,23 +204,46 @@ def _check_database(repair: bool) -> CheckOutcome:
         # database (no WAL pragma, no migration). --fix repairs explicitly.
         from urllib.parse import quote
 
-        conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True)
+        quoted = quote(str(db_path))
+        if db_path.with_name(db_path.name + "-wal").exists():
+            # A sidecar means a writer may be live: read through the WAL with
+            # plain mode=ro. The side files belong to that database, never to
+            # this check (deleting a -wal could destroy uncheckpointed commits).
+            uri = f"file:{quoted}?mode=ro"
+        else:
+            # No sidecar => no WAL frames exist, so immutable=1 is exact and
+            # creates ZERO side files: every database open_db() makes is
+            # persistently WAL, and a plain ro connection still creates
+            # -wal/-shm for the wal-index, then cannot remove them on close
+            # (read-only connections never checkpoint).  A sidecar appearing
+            # between the exists() check and connect is at worst a stale best-
+            # effort read: immutable readers never write anything.
+            uri = f"file:{quoted}?mode=ro&immutable=1"
+        conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
         try:
             version = _count_migrations(conn)
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        if "readonly" in str(exc).lower() or "cantopen" in str(exc).lower():
+        # Classify by result code, never message text: CANTOPEN's Python
+        # message is "unable to open database file", which contains neither
+        # 'readonly' nor 'cantopen'.  & 0xFF folds extended codes
+        # (SQLITE_CANTOPEN_ISDIR, SQLITE_READONLY_DIRECTORY, ...) onto their
+        # primary code.  These are exactly the "cannot open here" cases the
+        # plan degrades to a guided PASS; anything else is a real failure.
+        primary = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+        if primary in (sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY):
             return CheckOutcome(
                 "database", True,
-                f"cannot inspect read-only ({exc}); likely a synced/locked "
-                f"directory; run `ipo doctor --fix` for a writable check",
+                f"cannot inspect read-only ({exc}) at {db_path}; likely a "
+                f"synced/locked directory; run `ipo doctor --fix` for a "
+                f"writable check",
             )
         return CheckOutcome(
             "database", False,
-            f"sqlite failure: {exc}; run `ipo doctor --fix` or check the file "
-            f"is not locked by another ipostudio process",
+            f"sqlite failure reading {db_path}: {exc}; run `ipo doctor --fix` "
+            f"or check the file is not locked by another ipostudio process",
         )
     return CheckOutcome("database", True, f"schema at migration count {version}")
 
