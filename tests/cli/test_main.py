@@ -1,10 +1,12 @@
 import json
 import os
+import sys
 
 import pytest
 from click.testing import CliRunner
 
 from ipostudio import __version__
+from ipostudio.cli import main as cli_main
 from ipostudio.cli.main import cli
 
 
@@ -126,6 +128,32 @@ def test_doctor_fails_nonzero_on_bad_config(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "[FAIL]" in result.output
     assert "bogus_key" in result.output
+
+
+def test_doctor_config_check_contained_on_unexpected_error(tmp_path, monkeypatch):
+    # 每检查异常受纳: a non-ConfigError crash from load_config must be captured
+    # as a structured check result, never kill doctor mid-report (--json too).
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("config subsystem exploded")
+
+    monkeypatch.setattr("ipostudio.cli.main.load_config", explode)
+    result = invoke("doctor", "--json")
+    assert result.exit_code == 1  # reported failure, not a crash
+    payload = json.loads(result.output)  # report still complete
+    unexpected = [c for c in payload["checks"] if c["name"] == "unexpected"]
+    assert unexpected, payload["checks"]
+    assert "RuntimeError" in unexpected[0]["detail"]
+    assert unexpected[0]["ok"] is False
+
+
+def test_force_utf8_streams_tolerates_none_streams(monkeypatch):
+    # pythonw.exe has sys.stdout/sys.stderr set to None; every command must
+    # still run instead of dying with AttributeError on stream.isatty().
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    cli_main._force_utf8_streams()  # must not raise
 
 
 def test_doctor_json_structure(tmp_path, monkeypatch):

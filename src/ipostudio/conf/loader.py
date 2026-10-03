@@ -159,8 +159,8 @@ def load_config(
         for key in unknown:
             warnings_append = (
                 f"ignored key {key!r} written by a newer ipostudio "
-                f"(config_version={file_version}); it will be preserved by nothing "
-                f"and re-recognised after you upgrade back"
+                f"(config_version={file_version}); it is kept in the file on "
+                f"save and ignored until you upgrade back"
             )
             if warnings is not None:
                 warnings.append(warnings_append)
@@ -208,6 +208,19 @@ CREDENTIAL_KEYS = frozenset({"vllm_api_key", "embedding_api_key", "gateway_api_k
 _URL_CREDENTIAL_PATTERN = re.compile(r"(?i)://[^/\s:@]+:[^/\s@]+@")
 
 
+def _contains_url_credential(value: Any) -> bool:
+    """The invariant is on VALUES, not key names: every string reachable in a
+    config value — top-level, list/tuple elements (engine extra args), dict
+    values — is scanned for an inline URL credential."""
+    if isinstance(value, str):
+        return _URL_CREDENTIAL_PATTERN.search(value) is not None
+    if isinstance(value, (list, tuple)):
+        return any(_contains_url_credential(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_url_credential(item) for item in value.values())
+    return False
+
+
 class ConfigStore:
     """Validating, locked, dirty-key atomic writer for the active settings file.
 
@@ -237,7 +250,7 @@ class ConfigStore:
                  f"pass it via the environment (IPO_{key.upper()}) until the "
                  f"encrypted secret store lands (P4)")]
             )
-        if isinstance(value, str) and _URL_CREDENTIAL_PATTERN.search(value):
+        if _contains_url_credential(value):
             raise ConfigError(
                 [(f"{key}: value contains an inline URL credential "
                  f"(user:password@host); move the credential to an "

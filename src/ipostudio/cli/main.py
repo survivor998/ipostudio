@@ -33,7 +33,9 @@ def _force_utf8_streams() -> None:
     which can crash or mojibake CJK output; pin redirected output to UTF-8
     (requirement R1). Interactive consoles already use UTF-8 via the OS API."""
     for stream in (sys.stdout, sys.stderr):
-        if not stream.isatty() and hasattr(stream, "reconfigure"):
+        # pythonw.exe leaves the streams as None; skip them (AttributeError
+        # here would kill every command before its own error handling).
+        if stream is not None and not stream.isatty() and hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
@@ -280,9 +282,17 @@ def _contained(check, repair: bool) -> CheckOutcome:
 
 
 def run_doctor(repair: bool = False) -> tuple[list[CheckOutcome], list[str]]:
-    config_outcome, warnings = _check_config()
+    warnings: list[str] = []
+
+    def _config_outcome(_repair: bool) -> CheckOutcome:
+        nonlocal warnings
+        outcome, warnings = _check_config()
+        return outcome
+
     outcomes = [
-        config_outcome,
+        # the config check is contained like every other check: a non-
+        # ConfigError crash from load_config must not kill doctor mid-report
+        _contained(_config_outcome, repair),
         _contained(_check_data_dir, repair),
         _contained(_check_database, repair),
         _contained(_check_logs, repair),

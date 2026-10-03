@@ -113,12 +113,34 @@ def test_store_set_validates_and_rejects_without_mutation(tmp_path):
     assert isinstance(store.config.general.server_port, int)
 
 
+def test_store_set_rejects_url_credential_nested_in_containers(tmp_path):
+    """The URL-credential invariant is on VALUES, not key names: any string
+    anywhere inside a config value (list/tuple elements, dict values) must be
+    rejected, not just top-level strings (final review finding)."""
+    store = ConfigStore(tmp_path / "settings.toml", load_config(env={"IPO_DATA_DIR": str(tmp_path)}))
+    for value in (
+        ["--proxy", "http://user:secret@host"],            # flat list (reported leak)
+        ("--proxy", "http://user:secret@host"),            # tuple
+        [["--connect-timeout", "http://user:secret@host"]],  # nested list
+        {"proxy": "http://user:secret@host"},              # dict values
+    ):
+        with pytest.raises(ConfigError) as err:
+            store.set("llama_cpp_extra_args", value)
+        assert any("inline URL credential" in line for line in err.value.details)
+    assert store.config.engines.llama_cpp_extra_args == []  # memory unchanged
+    assert store._dirty == set()  # rejected calls never mark keys dirty
+
+
 def test_newer_config_version_unknown_keys_ignored_with_warning(tmp_path):
     write_settings(tmp_path, "config_version = 99\nfuture_key_xyz = 1\n")
     warnings: list[str] = []
     cfg = load_config(env={"IPO_DATA_DIR": str(tmp_path)}, warnings=warnings)
     assert cfg.general.config_version == 99
     assert any("future_key_xyz" in w for w in warnings)
+    # the warning must match save() reality: the dirty-key merge re-serializes
+    # the raw file, so unknown keys ARE kept in the file on save (final review)
+    assert any("kept in the file" in w and "ignored" in w for w in warnings)
+    assert not any("preserved by nothing" in w for w in warnings)
     assert not hasattr(cfg.general, "future_key_xyz")
 
 
