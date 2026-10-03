@@ -247,7 +247,9 @@ def _check_database(repair: bool) -> CheckOutcome:
             f"sqlite failure reading {db_path}: {exc}; run `ipo doctor --fix` "
             f"or check the file is not locked by another ipostudio process",
         )
-    return CheckOutcome("database", True, f"schema at migration count {version}")
+    return CheckOutcome(
+        "database", True, f"schema at migration count {version} ({db_path})"
+    )
 
 
 def _count_migrations(conn: sqlite3.Connection) -> int:

@@ -10,6 +10,7 @@ no network.  Findings are logged to .gstack/qa-reports/qa-log-cli.md.
 import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 from ctypes import wintypes
@@ -73,8 +74,9 @@ def _build_wal_db(db):
 
 
 def _migration_count(detail):
-    assert detail.startswith("schema at migration count "), detail
-    return int(detail.rsplit(" ", 1)[1])
+    m = re.search(r"migration count (\d+)", detail)
+    assert m, detail
+    return int(m.group(1))
 
 
 # ---------------------------------------------------------------- exit codes
@@ -336,3 +338,19 @@ def test_concurrent_doctors_same_data_dir(tmp_path):
         dbcheck = next(c for c in payload["checks"] if c["name"] == "database")
         assert dbcheck["ok"] is True
         assert "schema at migration count" in dbcheck["detail"]
+
+
+def test_doctor_database_success_detail_names_db_path(tmp_path, monkeypatch):
+    """Regression QA-C-03: the plain-success database detail used to omit the
+    db path while every other outcome (fail, degraded, repair) named it."""
+    db = tmp_path / "app.db"
+    monkeypatch.setenv("IPO_DB_PATH", str(db))
+    conn = open_db(db)
+    migrate(conn)
+    conn.close()
+    result = invoke("doctor", "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    check = next(c for c in payload["checks"] if c["name"] == "database")
+    assert check["ok"] is True
+    assert str(db) in check["detail"]
