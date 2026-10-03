@@ -430,7 +430,7 @@ def test_open_db_survives_simultaneous_cold_open_wal_race(tmp_path):
         errors: list[str] = []
         lock = threading.Lock()
 
-        def opener(db=db, barrier=barrier, lock=lock) -> None:
+        def opener(db=db, barrier=barrier, lock=lock, errors=errors) -> None:
             barrier.wait()
             try:
                 open_db(db).close()
