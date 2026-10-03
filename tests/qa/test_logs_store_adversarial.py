@@ -97,6 +97,20 @@ def test_redact_long_line_200k_tail_secret():
     assert "中文标记" in out and "尾部" in out  # context around the secret intact
 
 
+def test_redact_quoted_secret_with_spaces_fully_masked():
+    """Regression H-01: a quoted secret containing spaces used to leak its
+    tail ('api_key = "alpha beta gamma"' -> 'api_key = *** beta gamma"')
+    because the value group was a bare \\S+.  The value group must consume
+    the whole quoted string, closing quote included."""
+    out = redact_text('api_key = "alpha beta gamma" and the tail survives')
+    assert out == "api_key = *** and the tail survives"
+    quoted_json = redact_text('"api_key": "alpha beta gamma" ok')
+    assert "alpha beta gamma" not in quoted_json
+    single = redact_text("'password': 'seed one two' rest")
+    assert "seed one two" not in single
+    assert "rest" in single
+
+
 def test_redaction_filter_mutates_msg_args_and_exc_text():
     f = RedactionFilter()
     rec = logging.LogRecord(

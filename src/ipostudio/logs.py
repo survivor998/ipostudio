@@ -17,13 +17,18 @@ LOG_FILE_NAME = "ipostudio.log"
 # - the api-key alternative carries the same [a-z0-9_-]* token-start prefix as
 #   token/secret/password, so gateway_api_key= matches as one token (the left
 #   boundary rightly forbids starting mid-word after "_");
-# - the separator tolerates the closing quote of JSON-style keys ("api_key":).
+# - the separator tolerates the closing quote (single or double) of
+#   JSON/Python-style keys ("api_key": or 'password':).
+# The value group takes a fully quoted string (single or double) before the
+# bare-token fallback: \\S+ alone stops at the first space and leaked the tail
+# of quoted secrets ("api_key = "alpha beta gamma"" kept " beta gamma"").
 _SECRET_KEY_VALUE = re.compile(
     r"(?i)(?<![A-Za-z0-9_-])"
     r"((?:[a-z0-9_-]*token)|(?:[a-z0-9_-]*api[_-]?key)|(?:[a-z0-9_-]*secret)|"
     r"(?:[a-z0-9_-]*password)|(?:authorization)|(?:credential)|key)"
     r"(?![A-Za-z0-9_-])(\s*"
-    r'"?\s*[=:]\s*)(\S+)'
+    r"['\"]?\s*[=:]\s*)"
+    r'("[^"]*"|\'[^\']*\'|\S+)'
 )
 # credentials embedded in URLs: http://user:password@host
 _URL_CREDENTIAL = re.compile(r"(?i)(://)([^/\s:@]+):([^/\s@]+)(@)")
