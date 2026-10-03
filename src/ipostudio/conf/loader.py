@@ -301,10 +301,16 @@ class ConfigStore:
                     tomli_w.dump(merged, handle)
                     # durable atomic save: the data must reach the disk before
                     # the rename, or power loss can persist os.replace with an
-                    # empty/truncated settings file (H-02)
+                    # empty/truncated settings file (H-02).  fsync is
+                    # best-effort: some filesystems reject it outright, and
+                    # handle.flush() has already handed the data to the OS.
                     handle.flush()
-                    os.fsync(handle.fileno())
+                    try:
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        pass
                 os.replace(temp_name, self.path)
+                _fsync_directory(self.path.parent)
             except OSError as exc:
                 Path(temp_name).unlink(missing_ok=True)
                 raise ConfigError(
@@ -312,6 +318,11 @@ class ConfigStore:
                      f"check permissions and whether another process holds the "
                      f"file open, then retry")]
                 ) from exc
+            except BaseException:
+                # a non-OSError from the dump (TypeError on a bad value) must
+                # still not litter the data directory with temp files
+                Path(temp_name).unlink(missing_ok=True)
+                raise
         self._dirty.clear()
         return self.path
 
@@ -320,6 +331,24 @@ def _mkstemp_in(directory: Path) -> tuple[int, str]:
     import tempfile
 
     return tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort directory-entry durability after os.replace (POSIX: the
+    rename itself can still be lost to power loss otherwise).  Windows offers
+    no directory fsync -- os.open on a directory raises there, which the
+    except swallows, so no platform branching is needed.  A failure never
+    fails the save: the data itself was already fsynced before the rename."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 class _advisory_lock:

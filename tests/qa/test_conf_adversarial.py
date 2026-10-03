@@ -645,3 +645,41 @@ def test_float_config_version_still_triggers_forward_compat(tmp_path):
     store.save()
     data = tomllib.loads(cfg.read_text(encoding="utf-8"))
     assert data["future_key"] == 1
+
+
+def test_save_fsync_failure_degrades_to_best_effort(tmp_path, monkeypatch):
+    """Cross-model review: some filesystems reject fsync (EINVAL/ENOTSUP);
+    handle.flush() already handed the data to the OS, so a failed fsync must
+    not turn a previously-working save into a hard error."""
+    from ipostudio.conf import loader as loader_mod
+
+    def intolerant_fsync(fd):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(loader_mod.os, "fsync", intolerant_fsync)
+    cfg = tmp_path / "settings.toml"
+    config = load_config(base_env(cfg))
+    store = ConfigStore(cfg, config)
+    store.set("server_port", 18082)
+    store.save()
+    assert tomllib.loads(cfg.read_text(encoding="utf-8"))["server_port"] == 18082
+
+
+def test_save_cleans_temp_file_when_dump_raises_non_oserror(tmp_path, monkeypatch):
+    """Cross-model review: a non-OSError from tomli_w.dump (TypeError on a
+    non-serializable value) left the temp file behind; every failure on the
+    temp-write path must clean it up."""
+    import tomli_w as tomli_w_mod
+
+    def broken_dump(obj, handle):
+        raise TypeError("value is not TOML-serializable")
+
+    monkeypatch.setattr(tomli_w_mod, "dump", broken_dump)
+    cfg = tmp_path / "settings.toml"
+    config = load_config(base_env(cfg))
+    store = ConfigStore(cfg, config)
+    store.set("server_port", 18083)
+    with pytest.raises(TypeError):
+        store.save()
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith(".settings-")]
+    assert leftovers == [], f"temp files leaked: {leftovers}"
