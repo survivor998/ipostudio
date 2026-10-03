@@ -1,5 +1,7 @@
 import json
+import os
 
+import pytest
 from click.testing import CliRunner
 
 from ipostudio import __version__
@@ -8,6 +10,19 @@ from ipostudio.cli.main import cli
 
 def invoke(*args):
     return CliRunner().invoke(cli, list(args))
+
+
+@pytest.fixture
+def _restore_bootstrap_env():
+    """The group callback translates --config/--data-dir into os.environ and
+    deliberately never restores it; keep that leak out of the test process."""
+    saved = {key: os.environ.get(key) for key in ("IPO_CONFIG", "IPO_DATA_DIR")}
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def test_version_text_and_json():
@@ -48,6 +63,27 @@ def test_group_version_flag():
     result = invoke("--version")
     assert result.exit_code == 0
     assert __version__ in result.output
+
+
+def test_group_data_dir_flag_reaches_doctor(tmp_path, _restore_bootstrap_env):
+    # Global Constraints (CLI 约定): group-level --data-dir is the universal
+    # escape hatch, translated to IPO_DATA_DIR before any config load.
+    result = invoke("--data-dir", str(tmp_path), "doctor", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    data_dir = next(c for c in payload["checks"] if c["name"] == "data-dir")
+    assert data_dir["ok"] is True
+    assert data_dir["detail"] == str(tmp_path)  # doctor probed THIS directory
+
+
+def test_group_config_flag_is_read_before_config_load(tmp_path, _restore_bootstrap_env):
+    # The flag must override IPO_CONFIG semantics before the first config
+    # read: a value from the pointed-at file becomes observable behaviour.
+    settings = tmp_path / "custom-settings.toml"
+    settings.write_text('ui_lang = "en"\n', encoding="utf-8")
+    result = invoke("--config", str(settings), "guide")  # no --lang: follows config
+    assert result.exit_code == 0, result.output
+    assert "unified entry" in result.output  # English brief from the --config file
 
 
 def test_doctor_passes_on_fresh_environment(tmp_path, monkeypatch):
