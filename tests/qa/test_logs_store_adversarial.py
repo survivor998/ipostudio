@@ -477,3 +477,90 @@ def test_redact_escaped_quotes_and_line_local_multiline():
     assert "unclosed-value" not in out_tb
     assert 'x = combine("a", "b")' in out_tb
     assert "final diagnostic" in out_tb
+
+
+def test_switch_to_wal_deadline_stops_burning_busy_timeouts(tmp_path, monkeypatch):
+    """Four-source review convergence: with busy_timeout=5000 installed, every
+    BUSY from a persistent holder burns the full 5s handler wait, so 8 bounded
+    retries meant a ~42s open_db stall.  The retry loop must respect a
+    wall-clock deadline: once past it, the next BUSY re-raises instead of
+    starting another 5s wait."""
+    import ipostudio.store.database as db_mod
+
+    class BusyConn:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, sql, *args):
+            self.calls += 1
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = 5  # SQLITE_BUSY
+            raise exc
+
+    conn = BusyConn()
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        clock["t"] += 3.0  # 3s per read: the deadline is crossed after one retry
+        return clock["t"]
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(db_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(db_mod.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(sqlite3.OperationalError):
+        db_mod._switch_to_wal(conn)  # type: ignore[arg-type]
+    assert len(sleeps) <= 2, f"burned {len(sleeps)} retries past the deadline"
+
+
+def test_switch_to_wal_non_busy_reraises_without_retry(tmp_path, monkeypatch):
+    """T-1: a non-BUSY OperationalError must re-raise immediately -- no sleep,
+    no retry (retrying NOTADB or a disk error cannot succeed)."""
+    import ipostudio.store.database as db_mod
+
+    class NotADbConn:
+        def execute(self, sql, *args):
+            exc = sqlite3.OperationalError("file is not a database")
+            exc.sqlite_errorcode = 26  # SQLITE_NOTADB
+            raise exc
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(db_mod.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(sqlite3.OperationalError):
+        db_mod._switch_to_wal(NotADbConn())  # type: ignore[arg-type]
+    assert sleeps == []
+
+
+def test_switch_to_wal_retries_exhaustion_still_raises(tmp_path, monkeypatch):
+    """T-1: persistent BUSY within the deadline still raises after the bounded
+    attempt count, with one sleep per retried attempt."""
+    import ipostudio.store.database as db_mod
+
+    class BusyConn:
+        def execute(self, sql, *args):
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = 5  # SQLITE_BUSY
+            raise exc
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(db_mod.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(sqlite3.OperationalError):
+        db_mod._switch_to_wal(BusyConn())  # type: ignore[arg-type]
+    assert len(sleeps) == db_mod._WAL_SWITCH_RETRIES - 1
+
+
+def test_open_db_closes_connection_when_init_fails(tmp_path, monkeypatch):
+    """Codex review: if a pragma during open_db initialization raises, the
+    freshly created connection leaked (callers never receive it to close).
+    A closed handle releases the file, so the db becomes deletable on
+    Windows -- that is the observable."""
+    import ipostudio.store.database as db_mod
+
+    def explode(conn):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(db_mod, "_switch_to_wal", explode)
+    db = tmp_path / "leak.db"
+    db.write_bytes(b"")  # non-empty so the connection definitely opens it
+    with pytest.raises(RuntimeError):
+        open_db(db)
+    db.unlink()  # Windows: only succeeds when no handle is still open

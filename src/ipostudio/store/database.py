@@ -9,6 +9,11 @@ _MIGRATIONS_PACKAGE = "ipostudio.store.migrations"
 
 _WAL_SWITCH_RETRIES = 8
 _WAL_RETRY_SECONDS = 0.25
+# Wall-clock budget for the whole switch: with busy_timeout=5000 installed, a
+# BUSY from a persistent holder burns the full 5s handler wait per attempt, so
+# attempt-count alone bounded the stall at ~42s (four-source review
+# convergence).  Past this deadline the next BUSY re-raises immediately.
+_WAL_SWITCH_DEADLINE_SECONDS = 6.0
 
 
 class _Connection(sqlite3.Connection):
@@ -27,12 +32,18 @@ class _Connection(sqlite3.Connection):
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, factory=_Connection)
-    conn.row_factory = sqlite3.Row
-    # busy_timeout must be in place before every lock-taking statement; the
-    # WAL switch below takes locks, so install the handler first.
-    conn.execute("PRAGMA busy_timeout=5000")
-    _switch_to_wal(conn)
-    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        conn.row_factory = sqlite3.Row
+        # busy_timeout must be in place before every lock-taking statement; the
+        # WAL switch below takes locks, so install the handler first.
+        conn.execute("PRAGMA busy_timeout=5000")
+        _switch_to_wal(conn)
+        conn.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        # Callers never receive a partially-initialized connection: close it
+        # so a failed open cannot leak a live handle holding the file.
+        conn.close()
+        raise
     return conn
 
 
@@ -43,14 +54,20 @@ def _switch_to_wal(conn: sqlite3.Connection) -> None:
     other's SHARED->EXCLUSIVE upgrade needs; SQLite answers that mutual
     upgrade with SQLITE_BUSY immediately, WITHOUT invoking the busy handler
     (deadlock avoidance), so no pragma ordering fixes it.  The winner
-    finishes in milliseconds, so a bounded application-level retry does."""
+    finishes in milliseconds, so a bounded application-level retry does.
+    The retry is bounded both by attempt count AND by a wall-clock deadline:
+    a BUSY from a persistent lock holder burns the whole busy_timeout per
+    attempt, and only the deadline keeps that stall from multiplying."""
+    deadline = time.monotonic() + _WAL_SWITCH_DEADLINE_SECONDS
     for attempt in range(_WAL_SWITCH_RETRIES):
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             return
         except sqlite3.OperationalError as exc:
             primary = getattr(exc, "sqlite_errorcode", 0) & 0xFF
-            if primary != sqlite3.SQLITE_BUSY or attempt == _WAL_SWITCH_RETRIES - 1:
+            if primary != sqlite3.SQLITE_BUSY:
+                raise
+            if attempt == _WAL_SWITCH_RETRIES - 1 or time.monotonic() >= deadline:
                 raise
             time.sleep(_WAL_RETRY_SECONDS)
 
