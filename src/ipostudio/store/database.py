@@ -1,10 +1,14 @@
 """SQLite connection defaults and forward-only versioned migrations (ADR-002)."""
 
 import sqlite3
+import time
 from importlib import resources
 from pathlib import Path
 
 _MIGRATIONS_PACKAGE = "ipostudio.store.migrations"
+
+_WAL_SWITCH_RETRIES = 8
+_WAL_RETRY_SECONDS = 0.25
 
 
 class _Connection(sqlite3.Connection):
@@ -24,10 +28,31 @@ def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, factory=_Connection)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # busy_timeout must be in place before every lock-taking statement; the
+    # WAL switch below takes locks, so install the handler first.
     conn.execute("PRAGMA busy_timeout=5000")
+    _switch_to_wal(conn)
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def _switch_to_wal(conn: sqlite3.Connection) -> None:
+    """Enable WAL, retrying the switch under simultaneous cold opens.
+
+    Two openers of one fresh database can each hold the SHARED lock the
+    other's SHARED->EXCLUSIVE upgrade needs; SQLite answers that mutual
+    upgrade with SQLITE_BUSY immediately, WITHOUT invoking the busy handler
+    (deadlock avoidance), so no pragma ordering fixes it.  The winner
+    finishes in milliseconds, so a bounded application-level retry does."""
+    for attempt in range(_WAL_SWITCH_RETRIES):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            primary = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+            if primary != sqlite3.SQLITE_BUSY or attempt == _WAL_SWITCH_RETRIES - 1:
+                raise
+            time.sleep(_WAL_RETRY_SECONDS)
 
 
 def migration_files() -> list[tuple[str, str]]:

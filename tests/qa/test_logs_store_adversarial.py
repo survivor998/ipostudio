@@ -379,3 +379,68 @@ def test_open_db_fk_busy_timeout_and_dir_error(tmp_path):
     with pytest.raises(sqlite3.OperationalError) as ei:
         open_db(subdir)
     assert ei.value.sqlite_errorcode & 0xFF == 14  # SQLITE_CANTOPEN
+
+
+def test_open_db_waits_for_busy_db_instead_of_raw_lock_error(tmp_path):
+    """open_db on a database held by another connection (BEGIN EXCLUSIVE)
+    waits on the busy handler and finishes the WAL switch once the holder
+    releases — it must not fail, whatever handler is installed."""
+    db = tmp_path / "busy.db"
+    holder = sqlite3.connect(db, check_same_thread=False)
+    holder.execute("CREATE TABLE t (x)")
+    holder.execute("BEGIN EXCLUSIVE")
+    holder.execute("INSERT INTO t VALUES (1)")
+
+    def _release() -> None:
+        time.sleep(0.5)
+        holder.execute("COMMIT")
+
+    releaser = threading.Thread(target=_release)
+    releaser.start()
+    try:
+        start = time.monotonic()
+        conn = open_db(db)
+        try:
+            waited = time.monotonic() - start
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+    finally:
+        releaser.join()
+        holder.close()
+    assert mode == "wal"
+    # blocked on the holder, not an instant crash
+    assert waited >= 0.4
+
+
+def test_open_db_survives_simultaneous_cold_open_wal_race(tmp_path):
+    """Regression QA-B-01: simultaneous cold opens of one fresh database can
+    mutually deadlock on the WAL switch — each opener holds the SHARED lock
+    the other's SHARED->EXCLUSIVE upgrade needs, and SQLite answers that
+    upgrade with an immediate SQLITE_BUSY without invoking the busy handler
+    (deadlock avoidance).  Pre-fix this leaked a raw "database is locked"
+    OperationalError in ~20% of 6-way rounds; open_db must retry instead."""
+    for round_no in range(12):
+        db = tmp_path / f"race-{round_no}.db"
+        seed = sqlite3.connect(db)
+        seed.execute("CREATE TABLE t (x)")
+        seed.commit()
+        seed.close()
+        barrier = threading.Barrier(6, timeout=15)
+        errors: list[str] = []
+        lock = threading.Lock()
+
+        def opener(db=db, barrier=barrier, lock=lock) -> None:
+            barrier.wait()
+            try:
+                open_db(db).close()
+            except sqlite3.Error as exc:
+                with lock:
+                    errors.append(str(exc))
+
+        threads = [threading.Thread(target=opener) for _ in range(6)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=30)
+        assert errors == [], f"round {round_no}: {errors}"
