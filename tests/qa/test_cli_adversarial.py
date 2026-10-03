@@ -21,10 +21,10 @@ from click.testing import CliRunner
 
 from ipostudio import __version__
 from ipostudio.cli.main import cli
-from ipostudio.conf.paths import ensure_layout
+from ipostudio.conf.paths import BOOTSTRAP_ENV, ensure_layout
 from ipostudio.store.database import migrate, open_db
 
-BOOTSTRAP_KEYS = ("IPO_CONFIG", "IPO_DATA_DIR", "IPO_DB_PATH")
+BOOTSTRAP_KEYS = tuple(sorted(BOOTSTRAP_ENV))  # review M-1: track the source of truth
 SUBPROCESS_TIMEOUT = 30
 
 
@@ -408,3 +408,12 @@ def test_doctor_tables_without_registry_fails_not_pass(tmp_path, monkeypatch):
     check = next(c for c in payload["checks"] if c["name"] == "database")
     assert check["ok"] is False
     assert "registry" in check["detail"]
+
+
+def test_bootstrap_keys_track_production_constant():
+    """Maintainability review M-1: the env-restore fixture must track the
+    production BOOTSTRAP_ENV constant, not a redeclared tuple that silently
+    misses new bootstrap vars."""
+    from ipostudio.conf.paths import BOOTSTRAP_ENV
+
+    assert set(BOOTSTRAP_KEYS) == BOOTSTRAP_ENV
