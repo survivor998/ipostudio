@@ -369,3 +369,19 @@ def test_doctor_zero_byte_db_guided_pass(tmp_path, monkeypatch):
     check = next(c for c in payload["checks"] if c["name"] == "database")
     assert check["ok"] is True
     assert "not initialized" in check["detail"]
+
+
+def test_doctor_fix_with_blocking_data_dir_keeps_check_names(tmp_path, monkeypatch):
+    """Regression H-05: an environmental OSError during --fix (IPO_DATA_DIR
+    is a file) used to rename every affected check to 'unexpected' with a
+    false 'bug in ipo doctor' attribution, breaking the exactly-4-check-names
+    JSON contract."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("IPO_DATA_DIR", str(blocker))
+    result = invoke("doctor", "--fix", "--json")
+    payload = json.loads(result.output)
+    assert {c["name"] for c in payload["checks"]} == {
+        "config", "data-dir", "database", "logs",
+    }
+    assert payload["ok"] is False

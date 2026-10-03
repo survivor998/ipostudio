@@ -288,14 +288,21 @@ def _check_logs(repair: bool) -> CheckOutcome:
     return CheckOutcome("logs", True, str(path))
 
 
-def _contained(check, repair: bool) -> CheckOutcome:
+def _contained(name: str, check, repair: bool) -> CheckOutcome:
     """Every check failure still returns a structured outcome, so `--json`
     never dies mid-report (eng review)."""
     try:
         return check(repair)
     except Exception as exc:  # noqa: BLE001 - diagnostic command must not crash
-        return CheckOutcome("unexpected", False, f"{check.__name__}: {exc!r}; "
-                          f"this is a bug in ipo doctor; report it with --json output")
+        # Keep the canonical check name (the JSON contract is exactly these
+        # four) and attribute honestly: an unexpected crash during a check is
+        # usually environmental (permissions, path shape), not a doctor bug.
+        return CheckOutcome(
+            name, False,
+            f"unexpected error during the {name} check: {exc!r}; this is "
+            f"often environmental rather than a bug in ipo doctor; re-run "
+            f"and report with --json output if it persists",
+        )
 
 
 def run_doctor(repair: bool = False) -> tuple[list[CheckOutcome], list[str]]:
@@ -309,10 +316,10 @@ def run_doctor(repair: bool = False) -> tuple[list[CheckOutcome], list[str]]:
     outcomes = [
         # the config check is contained like every other check: a non-
         # ConfigError crash from load_config must not kill doctor mid-report
-        _contained(_config_outcome, repair),
-        _contained(_check_data_dir, repair),
-        _contained(_check_database, repair),
-        _contained(_check_logs, repair),
+        _contained("config", _config_outcome, repair),
+        _contained("data-dir", _check_data_dir, repair),
+        _contained("database", _check_database, repair),
+        _contained("logs", _check_logs, repair),
     ]
     return outcomes, warnings
 

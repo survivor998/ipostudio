@@ -133,6 +133,9 @@ def test_doctor_fails_nonzero_on_bad_config(tmp_path, monkeypatch):
 def test_doctor_config_check_contained_on_unexpected_error(tmp_path, monkeypatch):
     # 每检查异常受纳: a non-ConfigError crash from load_config must be captured
     # as a structured check result, never kill doctor mid-report (--json too).
+    # H-05: the contained outcome keeps the canonical "config" name (the JSON
+    # contract is exactly these four checks) instead of renaming to
+    # "unexpected", and attributes honestly instead of "a bug in ipo doctor".
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
 
     def explode(*args, **kwargs):
@@ -142,10 +145,15 @@ def test_doctor_config_check_contained_on_unexpected_error(tmp_path, monkeypatch
     result = invoke("doctor", "--json")
     assert result.exit_code == 1  # reported failure, not a crash
     payload = json.loads(result.output)  # report still complete
-    unexpected = [c for c in payload["checks"] if c["name"] == "unexpected"]
-    assert unexpected, payload["checks"]
-    assert "RuntimeError" in unexpected[0]["detail"]
-    assert unexpected[0]["ok"] is False
+    assert {c["name"] for c in payload["checks"]} == {
+        "config", "data-dir", "database", "logs",
+    }
+    config_check = next(
+        c for c in payload["checks"] if c["name"] == "config"
+    )
+    assert config_check["ok"] is False
+    assert "RuntimeError" in config_check["detail"]
+    assert "unexpected error during the config check" in config_check["detail"]
 
 
 def test_force_utf8_streams_tolerates_none_streams(monkeypatch):
