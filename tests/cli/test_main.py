@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from ipostudio import __version__
 from ipostudio.cli import main as cli_main
 from ipostudio.cli.main import cli
+from ipostudio.conf.schema import FLAT_KEYS
 
 
 def invoke(*args):
@@ -480,5 +481,68 @@ def test_config_set_on_broken_baseline_reports_and_exits_1(tmp_path, monkeypatch
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     (tmp_path / "settings.toml").write_text("bogus_key = 1\n", encoding="utf-8")
     result = invoke("config", "set", "server_port", "19000")
+    assert result.exit_code == 1
+    assert "bogus_key" in all_output(result)
+
+
+def test_config_list_groups_families_and_marks_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    assert invoke("config", "set", "server_port", "19000").exit_code == 0
+    monkeypatch.setenv("IPO_UI_THEME", "dark")
+    result = invoke("config", "list")
+    assert result.exit_code == 0
+    assert f"settings: {tmp_path / 'settings.toml'}" in result.output
+    # the formatter pads keys to the family max: collapse runs of whitespace
+    # before asserting, so the test does not depend on column widths
+    flat = " ".join(" ".join(line.split()) for line in result.output.splitlines())
+    assert "inference_engine = llama.cpp" in flat  # default: unmarked
+    assert "server_port = 19000" in flat and "[file]" in flat
+    assert "ui_theme = dark" in flat and "[env IPO_UI_THEME]" in flat
+
+
+def test_config_list_masks_credential_values_in_text_and_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.toml").write_text(
+        'config_version = 1\nvllm_api_key = "sk-hand-written"\n', encoding="utf-8"
+    )
+    result = invoke("config", "list")
+    assert result.exit_code == 0
+    assert "sk-hand-written" not in result.output
+    assert "***" in result.output
+    assert "credential: masked — set via settings file or IPO_X" in result.output
+    payload = json.loads(invoke("config", "list", "--json").output)
+    cred = next(row for row in payload if row["key"] == "vllm_api_key")
+    assert cred["value"] == "***"
+    assert cred["credential"] is True
+    # JSON source is an atomic origin token, not display prose (DX F2)
+    assert cred["source"] in {"file", "env IPO_VLLM_API_KEY", "default"}
+
+
+def test_config_list_unset_credential_reads_empty_in_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    payload = json.loads(invoke("config", "list", "--json").output)
+    cred = next(row for row in payload if row["key"] == "vllm_api_key")
+    assert cred["value"] == ""  # unset: nothing to mask, still no echo path
+    assert cred["credential"] is True
+
+
+def test_config_list_json_rows_cover_every_known_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    payload = json.loads(invoke("config", "list", "--json").output)
+    assert {row["key"] for row in payload} == set(FLAT_KEYS)
+    assert all({"family", "key", "value", "source"} <= set(row) for row in payload)
+
+
+def test_config_list_empty_strings_read_as_not_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "list")
+    flat = " ".join(" ".join(line.split()) for line in result.output.splitlines())
+    assert "vllm_api_base = (not set)" in flat  # schema default ""
+
+
+def test_config_list_on_broken_settings_exits_1(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.toml").write_text("bogus_key = 1\n", encoding="utf-8")
+    result = invoke("config", "list")
     assert result.exit_code == 1
     assert "bogus_key" in all_output(result)

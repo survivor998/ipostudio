@@ -18,6 +18,7 @@ from ipostudio.conf.loader import (
     ConfigStore,
     _contains_url_credential,
     coerce_value,
+    file_key_names,
     load_config,
     suggest_key,
 )
@@ -27,7 +28,7 @@ from ipostudio.conf.paths import (
     resolve_data_dir,
     resolve_db_path,
 )
-from ipostudio.conf.schema import FLAT_KEYS
+from ipostudio.conf.schema import FAMILIES, FLAT_KEYS
 from ipostudio.logs import log_file_path
 from ipostudio.store.database import migrate, open_db
 
@@ -547,3 +548,81 @@ def set_value(key: str, value: str) -> None:
         )
     current = getattr(getattr(cfg, FLAT_KEYS[key]), key)
     click.echo(f"{key} = {_format_value(current)} (saved to {saved})")
+
+
+@config.command(name="list")
+@click.option("--json", "as_json", is_flag=True, help="emit machine-readable output")
+def list_keys(as_json: bool) -> None:
+    """List every known setting with its effective value and origin."""
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        _print_config_errors(exc)
+        sys.exit(1)
+    config_path = resolve_config_path()
+    try:
+        explicit = file_key_names(config_path)
+    except ConfigError:
+        explicit = set()  # file vanished mid-run: source markers degrade to defaults
+    # accepted race (Codex ENG #4): load_config and file_key_names read the
+    # file twice; a concurrent `config set` between the reads could pair a
+    # fresh value with a stale source tag.  Atomic writes keep every single
+    # read self-consistent, the worst case is a cosmetic mislabel, and the
+    # single-user CLI makes the window microseconds — two-read simplicity is
+    # kept over a data-layer load_with_sources() refactor (P5/P3)
+    rows: list[dict] = []
+    for family, model in FAMILIES.items():
+        section = getattr(cfg, family)
+        for key in model.model_fields:
+            env_var = f"IPO_{key.upper()}"
+            if key in CREDENTIAL_KEYS:
+                # JSON source stays an atomic origin token (DX F2): the
+                # `credential: true` flag carries masking, and the long
+                # human label is text-channel only
+                if env_var in os.environ:
+                    source = f"env {env_var}"
+                elif key in explicit:
+                    source = "file"
+                else:
+                    source = "default"
+            elif env_var in os.environ:
+                source = f"env {env_var}"
+            elif key in explicit:
+                source = "file"
+            else:
+                source = "default"
+            raw_value = getattr(section, key)
+            # credential values are never echoed — masked even in --json
+            value = "***" if key in CREDENTIAL_KEYS and raw_value else raw_value
+            # read-side URL-credential guard: mirror the write policy (Codex ENG #1)
+            value = _mask_url_credentials(value)
+            rows.append(
+                {
+                    "family": family,
+                    "key": key,
+                    "value": value,
+                    "source": source,
+                    "credential": key in CREDENTIAL_KEYS,
+                }
+            )
+    if as_json:
+        click.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    click.echo(f"settings: {config_path}")
+    for family in FAMILIES:
+        members = [row for row in rows if row["family"] == family]
+        click.echo(family)
+        # default=0: the invariant "every family is non-empty" is currently
+        # true but implicit — an empty family must not crash the listing (ENG F9b)
+        width = max((len(row["key"]) for row in members), default=0)
+        for row in members:
+            display = (
+                "(not set)" if row["value"] in ("", None) else _format_value(row["value"])
+            )
+            marker = "" if row["source"] == "default" else f"  [{row['source']}]"
+            if row["credential"]:
+                # origin must stay truthful: a hand-written file value is NOT
+                # "set via IPO_X" (CEO F3c) — the text label states masking
+                # plus both possible origins
+                marker = "  [credential: masked — set via settings file or IPO_X]"
+            click.echo(f"  {row['key']:<{width}} = {display}{marker}")
