@@ -292,3 +292,20 @@ def test_doctor_truncates_long_details_with_json_pointer(tmp_path, monkeypatch):
     assert "(+100 chars; use --json)" in result.output  # text channel truncates
     payload = json.loads(invoke("doctor", "--json").output)
     assert payload["checks"][0]["detail"] == long_detail  # --json always full
+
+
+def test_doctor_force_color_survives_a_real_pipe(tmp_path):
+    # CliRunner(color=True) forces color for every echo, so the runner cannot
+    # discriminate click.echo's color passthrough; only a real pipe — where a
+    # missing `color=color` silently strips painted ANSI — pins it (Codex ENG #3).
+    import subprocess
+
+    env = dict(os.environ, IPO_DATA_DIR=str(tmp_path), FORCE_COLOR="1")
+    env.pop("NO_COLOR", None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "ipostudio", "doctor"],
+        env=env, capture_output=True, timeout=60,
+        check=False,  # returncode is asserted below, not raised (ruff PLW1510)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert b"\x1b[32m[PASS]" in proc.stdout  # ANSI survived the pipe
