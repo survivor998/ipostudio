@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 
 from ipostudio.conf import loader
-from ipostudio.conf.loader import ConfigError, ConfigStore, load_config
+from ipostudio.conf.loader import (
+    ConfigError,
+    ConfigStore,
+    coerce_value,
+    file_key_names,
+    load_config,
+    suggest_key,
+)
 
 
 def write_settings(tmp_path: Path, body: str) -> Path:
@@ -333,3 +340,96 @@ def test_subprocess_writer_hits_held_lock_and_times_out(tmp_path):
     finally:
         os.close(fd)
         lock_path.unlink(missing_ok=True)  # parent releases; nothing leaks
+
+
+def test_suggest_key_returns_did_you_mean_for_close_matches():
+    assert suggest_key("server_prot") == "; did you mean 'server_port'?"
+
+
+def test_suggest_key_accepts_custom_pool():
+    assert suggest_key("hepl", pool={"help", "guide"}) == "; did you mean 'help'?"
+
+
+def test_suggest_key_empty_for_distant_names():
+    assert suggest_key("zzzzzz") == ""
+
+
+def test_coerce_value_parses_scalars_lists_and_none():
+    assert coerce_value("server_port", "19000") == 19000
+    assert coerce_value("auto_start_server", "on") is True
+    assert coerce_value("server_temp", "0.5") == 0.5
+    assert coerce_value("ui_lang", "  en ") == "en"  # shell-transplanted padding
+    assert coerce_value("model_dirs", '["a", "b"]') == ["a", "b"]  # JSON keeps commas
+    assert coerce_value("model_dirs", "a, b") == ["a", "b"]  # legacy comma form
+    assert coerce_value("local_model_path", "none") is None  # optional clearing
+
+
+def test_coerce_value_rejects_unknown_key_with_suggestion():
+    with pytest.raises(ConfigError) as excinfo:
+        coerce_value("nope_key", "1")
+    assert "unknown config key" in str(excinfo.value)
+
+
+def test_coerce_value_phrases_bool_errors_for_the_cli_not_the_shell():
+    # origin accuracy: _coerce_env's default remediation names the shell env
+    # var; a CLI set must state the fix for the command line instead, with
+    # the CONFIG KEY as origin — never the IPO_ env name (Codex DX #2)
+    with pytest.raises(ConfigError) as excinfo:
+        coerce_value("auto_start_server", "maybe")
+    message = str(excinfo.value)
+    assert "auto_start_server: expected a boolean" in message
+    assert "true/false/1/0" in message
+    assert "environment variable" not in message
+    assert "IPO_AUTO_START_SERVER" not in message
+
+
+def test_coerce_value_reports_undeclarable_values_as_config_error():
+    with pytest.raises(ConfigError) as excinfo:
+        coerce_value("model_dirs", "[broken")
+    assert "cannot convert" in str(excinfo.value)
+    assert '["a", "b"]' in str(excinfo.value)  # remediation carries an example
+
+
+def test_file_key_names_reports_explicit_keys(tmp_path):
+    settings = tmp_path / "settings.toml"
+    settings.write_text('ui_lang = "en"\n', encoding="utf-8")
+    assert file_key_names(settings) == {"ui_lang"}
+    assert file_key_names(tmp_path / "missing.toml") == set()
+
+
+def test_save_reports_unwritable_parent_as_config_error(tmp_path, monkeypatch):
+    # mkdir failure must surface through the error contract, not a raw OSError
+    from ipostudio.conf.loader import ConfigStore
+    from ipostudio.conf.schema import AppConfig
+
+    store = ConfigStore(tmp_path / "settings.toml", AppConfig())
+
+    def explode(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(type(tmp_path), "mkdir", explode, raising=False)
+    with pytest.raises(ConfigError) as excinfo:
+        store.save()
+    assert "cannot write settings file" in str(excinfo.value)
+
+
+def test_save_reports_unopenable_lock_as_config_error(tmp_path, monkeypatch):
+    # lock-file creation failure (permissions) is also inside the boundary (Codex ENG #2)
+    import os as _os
+
+    from ipostudio.conf.loader import ConfigStore
+    from ipostudio.conf.schema import AppConfig
+
+    (tmp_path / "settings.toml").write_text("ui_lang = \"zh\"\n", encoding="utf-8")
+    store = ConfigStore(tmp_path / "settings.toml", AppConfig())
+    real_open = _os.open
+
+    def locked_open(path, flags, *args, **kwargs):
+        if str(path).endswith(".lock"):
+            raise PermissionError("denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(_os, "open", locked_open)
+    with pytest.raises(ConfigError) as excinfo:
+        store.save()
+    assert "cannot write settings file" in str(excinfo.value)

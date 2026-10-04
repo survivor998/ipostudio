@@ -15,7 +15,7 @@ import os
 import re
 import tomllib
 import types
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Self, Union, get_args, get_origin
 
@@ -60,12 +60,21 @@ def _strip_optional(ann: Any) -> Any:
     return ann
 
 
-def _suggest(key: str) -> str:
-    close = difflib.get_close_matches(key, FLAT_KEYS, n=1, cutoff=0.6)
+def suggest_key(key: str, pool: Iterable[str] | None = None) -> str:
+    close = difflib.get_close_matches(
+        key, pool if pool is not None else FLAT_KEYS, n=1, cutoff=0.6
+    )
     return f"; did you mean {close[0]!r}?" if close else ""
 
 
-def _coerce_env(raw_key: str, raw_value: str, ann: Any) -> Any:
+def _coerce_env(
+    raw_key: str,
+    raw_value: str,
+    ann: Any,
+    *,
+    bool_remediation: str = "fix the environment variable or unset it",
+    origin_label: str | None = None,
+) -> Any:
     if _is_optional(ann) and raw_value.strip().lower() in {"", "none", "null"}:
         return None
     ann = _strip_optional(ann)
@@ -76,9 +85,12 @@ def _coerce_env(raw_key: str, raw_value: str, ann: Any) -> Any:
             return True
         if lowered in _FALSE_WORDS:
             return False
+        # origin_label/bool_remediation let the CLI re-point this error at the
+        # command line (config key as subject); loader's own call sites take
+        # the defaults and keep the byte-identical env-var message
         raise ConfigError(
-            [(f"{raw_key}: expected a boolean (true/false/1/0), got {raw_value!r}; "
-             f"fix the environment variable or unset it")]
+            [(f"{origin_label or raw_key}: expected a boolean (true/false/1/0), "
+             f"got {raw_value!r}; {bool_remediation}")]
         )
     if ann is int:
         return int(raw_value.strip())
@@ -123,6 +135,47 @@ def _read_toml(path: Path) -> dict[str, Any]:
 _SCHEMA_CONFIG_VERSION = 1
 
 
+def coerce_value(key: str, raw: str) -> Any:
+    """Turn a CLI-provided string into the typed value for `key`.
+
+    Same coercion rules as IPO_* environment variables (one code path:
+    `_coerce_env`), so `ipo config set` and the env override can never
+    disagree about what a value means.  Remediation text is re-phrased for
+    the command line: the error origin is the CLI argument, not the shell."""
+    if key not in FLAT_KEYS:
+        raise ConfigError(
+            [f"unknown config key: {key}{suggest_key(key)}; see `ipo config list`"]
+        )
+    try:
+        coerced = _coerce_env(
+            f"IPO_{key.upper()}", raw, _annotation(FLAT_KEYS[key], key),
+            bool_remediation="pass a boolean true/false/1/0 on the command line",
+            origin_label=key,
+        )
+    except ValueError as exc:
+        # int/float/JSON-array coercion failures surface as ConfigError too:
+        # the CLI write surface has the same single error contract as
+        # load_config, with the config key as subject (never the IPO_ name)
+        raise ConfigError(
+            [(f"{key}: cannot convert {raw!r} ({exc}); pass a JSON array of "
+              f"strings, e.g. [\"a\", \"b\"]")]
+        ) from exc
+    if isinstance(coerced, list) and any(not isinstance(item, str) for item in coerced):
+        # _coerce_env str()-ifies JSON array elements (loader's env-path legacy);
+        # a public CLI write surface must reject [null, {...}] instead of
+        # silently accepting it as strings (Codex ENG acceptance-b)
+        raise ConfigError(
+            [(f"{key}: JSON array elements must all be strings; got a "
+              f"non-string element in {raw!r}; quote every element")]
+        )
+    return coerced
+
+
+def file_key_names(path: Path) -> set[str]:
+    """Keys explicitly present in the settings file (source tracking)."""
+    return set(_read_toml(path))
+
+
 def load_config(
     env: Mapping[str, str] | None = None,
     warnings: list[str] | None = None,
@@ -150,7 +203,7 @@ def load_config(
         if key not in FLAT_KEYS:
             # env vars come from the CURRENT shell, not a newer file: always fatal
             details.append(
-                f"unknown environment key: {raw_key}{_suggest(key)}; "
+                f"unknown environment key: {raw_key}{suggest_key(key)}; "
                 f"unset it or correct the spelling in your shell"
             )
             continue
@@ -190,7 +243,7 @@ def load_config(
     else:
         for key in unknown:
             details.append(
-                f"unknown config key: {key} (in {config_path}){_suggest(key)}; "
+                f"unknown config key: {key} (in {config_path}){suggest_key(key)}; "
                 f"remove the line, fix the spelling, or upgrade ipostudio"
             )
     if details:
@@ -259,7 +312,7 @@ class ConfigStore:
 
     def set(self, key: str, value: Any) -> None:
         if key not in FLAT_KEYS:
-            raise ConfigError([(f"unknown config key: {key}{_suggest(key)}; "
+            raise ConfigError([(f"unknown config key: {key}{suggest_key(key)}; "
                                f"check the spelling against `ipo guide`")])
         if key in CREDENTIAL_KEYS:
             raise ConfigError(
@@ -288,46 +341,51 @@ class ConfigStore:
         self._dirty.add((family, key))
 
     def save(self) -> Path:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        with _advisory_lock(lock_path):
-            merged: dict[str, Any] = dict(_read_toml(self.path))
-            for key in CREDENTIAL_KEYS:
-                merged.pop(key, None)
-            for family, key in self._dirty:
-                value = getattr(getattr(self.config, family), key)
-                if value is None:
+        # Codex ENG #2: the OSError->ConfigError boundary covers ALL pre-commit
+        # steps -- mkdir, the advisory-lock open and the mkstemp -- not just the
+        # write itself, so permission failures surface through the error
+        # contract instead of a raw OSError.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+            with _advisory_lock(lock_path):
+                merged: dict[str, Any] = dict(_read_toml(self.path))
+                for key in CREDENTIAL_KEYS:
                     merged.pop(key, None)
-                else:
-                    merged[key] = value
-            fd, temp_name = _mkstemp_in(self.path.parent)
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    tomli_w.dump(merged, handle)
-                    # durable atomic save: the data must reach the disk before
-                    # the rename, or power loss can persist os.replace with an
-                    # empty/truncated settings file (H-02).  fsync is
-                    # best-effort: some filesystems reject it outright, and
-                    # handle.flush() has already handed the data to the OS.
-                    handle.flush()
-                    try:
-                        os.fsync(handle.fileno())
-                    except OSError:
-                        pass
-                os.replace(temp_name, self.path)
+                for family, key in self._dirty:
+                    value = getattr(getattr(self.config, family), key)
+                    if value is None:
+                        merged.pop(key, None)
+                    else:
+                        merged[key] = value
+                fd, temp_name = _mkstemp_in(self.path.parent)
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        tomli_w.dump(merged, handle)
+                        # durable atomic save: the data must reach the disk before
+                        # the rename, or power loss can persist os.replace with an
+                        # empty/truncated settings file (H-02).  fsync is
+                        # best-effort: some filesystems reject it outright, and
+                        # handle.flush() has already handed the data to the OS.
+                        handle.flush()
+                        try:
+                            os.fsync(handle.fileno())
+                        except OSError:
+                            pass
+                    os.replace(temp_name, self.path)
+                except BaseException:
+                    # a failure from the dump (TypeError on a bad value) or the
+                    # write must not litter the data directory with temp files;
+                    # OSErrors re-raised here hit the boundary below
+                    Path(temp_name).unlink(missing_ok=True)
+                    raise
                 _fsync_directory(self.path.parent)
-            except OSError as exc:
-                Path(temp_name).unlink(missing_ok=True)
-                raise ConfigError(
-                    [(f"cannot write settings file {self.path}: {exc}; "
-                     f"check permissions and whether another process holds the "
-                     f"file open, then retry")]
-                ) from exc
-            except BaseException:
-                # a non-OSError from the dump (TypeError on a bad value) must
-                # still not litter the data directory with temp files
-                Path(temp_name).unlink(missing_ok=True)
-                raise
+        except OSError as exc:
+            raise ConfigError(
+                [(f"cannot write settings file {self.path}: {exc}; "
+                 f"check permissions and whether another process holds the "
+                 f"file open, then retry")]
+            ) from exc
         self._dirty.clear()
         return self.path
 
@@ -384,6 +442,16 @@ class _advisory_lock:
 
     def __exit__(self, *exc: object) -> None:
         if self.held:
-            os.close(self.fd)
-            self.path.unlink(missing_ok=True)
             self.held = False
+            # lock release is post-commit cleanup (save() has already landed
+            # the file by the time __exit__ runs): a failure here must never
+            # be reported as a save failure, so stay best-effort.  Lock-file
+            # residue is TODO-007's stale-lock self-healing territory.
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError:
+                pass
