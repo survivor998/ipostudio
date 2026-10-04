@@ -8,7 +8,7 @@ from click.testing import CliRunner
 
 from ipostudio import __version__
 from ipostudio.cli import main as cli_main
-from ipostudio.cli.main import cli
+from ipostudio.cli.main import WELCOME_STEPS, cli
 from ipostudio.conf.schema import FLAT_KEYS
 
 
@@ -546,3 +546,82 @@ def test_config_list_on_broken_settings_exits_1(tmp_path, monkeypatch):
     result = invoke("config", "list")
     assert result.exit_code == 1
     assert "bogus_key" in all_output(result)
+
+
+def test_bare_invocation_prints_welcome_card(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke()
+    assert result.exit_code == 0
+    assert __version__ in result.output
+    assert "ipo doctor --fix" in result.output
+    assert "ipo config list" in result.output
+    assert "ipo guide" in result.output
+
+
+def test_welcome_card_follows_ui_lang_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("IPO_UI_LANG", "en")
+    result = invoke()
+    assert result.exit_code == 0
+    assert "Getting started" in result.output
+
+
+def test_welcome_card_defaults_to_zh_brief(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("IPO_UI_LANG", raising=False)  # ambient env must not flip the card
+    monkeypatch.delenv("IPO_CONFIG", raising=False)
+    result = invoke()
+    assert result.exit_code == 0
+    assert "上手三步" in result.output
+
+
+def test_welcome_card_falls_back_to_zh_on_broken_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("IPO_UI_LANG", raising=False)
+    monkeypatch.delenv("IPO_CONFIG", raising=False)
+    (tmp_path / "settings.toml").write_text("bogus_key = 1\n", encoding="utf-8")
+    result = invoke()
+    assert result.exit_code == 0
+    assert "上手三步" in result.output
+
+
+def test_global_flags_without_subcommand_still_show_welcome(
+    tmp_path, monkeypatch, _restore_bootstrap_env
+):
+    result = invoke("--data-dir", str(tmp_path))
+    assert result.exit_code == 0
+    assert "ipo guide" in result.output
+
+
+def test_subcommand_invocation_never_prints_welcome(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("version")
+    assert result.exit_code == 0
+    assert "上手三步" not in result.output
+    assert "Getting started" not in result.output
+
+
+def test_welcome_card_marks_next_step_by_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("IPO_UI_LANG", raising=False)
+    monkeypatch.delenv("IPO_CONFIG", raising=False)
+    result = invoke()
+    doctor_line = next(l for l in result.output.splitlines() if "ipo doctor --fix" in l)
+    guide_line = next(l for l in result.output.splitlines() if "ipo guide" in l)
+    assert "从这里开始" in doctor_line  # uninitialized: doctor --fix is next
+    assert "从这里开始" not in guide_line
+    assert invoke("doctor", "--fix").exit_code == 0
+    result2 = invoke()
+    doctor_line2 = next(l for l in result2.output.splitlines() if "ipo doctor --fix" in l)
+    guide_line2 = next(l for l in result2.output.splitlines() if "ipo guide" in l)
+    assert "从这里开始" in guide_line2  # initialized: guide is next
+    assert "从这里开始" not in doctor_line2
+
+
+def test_welcome_card_only_references_registered_commands():
+    # guard: the card may never point at a command that does not exist
+    # (CEO F4a) — the task ordering alone must not be the only guarantee
+    for template in WELCOME_STEPS.values():
+        for command, _ in template:
+            name = command.split()[1]
+            assert name in cli.commands, f"welcome card references missing command: {name}"

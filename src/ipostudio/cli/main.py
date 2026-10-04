@@ -37,6 +37,57 @@ GUIDE_BRIEF = {
     "en": "ipostudio CLI: unified entry for local models, inference services and apps (foundation release).",
 }
 
+WELCOME_STEPS: dict[str, list[tuple[str, str]]] = {
+    "zh": [
+        ("ipo doctor --fix", "初始化数据目录并完成环境体检"),
+        ("ipo config list", "浏览全部配置项"),
+        ("ipo guide", "阅读完整命令手册"),
+    ],
+    "en": [
+        ("ipo doctor --fix", "initialize the data directory and verify the environment"),
+        ("ipo config list", "browse every setting"),
+        ("ipo guide", "read the full command manual"),
+    ],
+}
+WELCOME_HEAD: dict[str, str] = {
+    "zh": "ipostudio {version} — 本地优先的 AI 工作站（当前为基础版本）\n\n上手三步：",
+    "en": "ipostudio {version} — local-first AI workstation (foundation release)\n\nGetting started:",
+}
+WELCOME_TAIL: dict[str, str] = {
+    "zh": "任意命令加 --help 查看用法；机器可读输出加 --json。",
+    "en": "Append --help to any command for usage; add --json for machine-readable output.",
+}
+WELCOME_ARROW: dict[str, str] = {"zh": "← 从这里开始", "en": "<- start here"}
+
+
+def _welcome_lang() -> str:
+    try:
+        lang = load_config().ui.ui_lang
+    except ConfigError:
+        return "zh"  # broken config must not break the card (guide's rule)
+    return lang if lang in WELCOME_STEPS else "zh"  # enum drift can never KeyError
+
+
+def _welcome_initialized() -> bool:
+    return resolve_db_path().exists()
+
+
+def _welcome_text(lang: str, initialized: bool) -> str:
+    """State-aware first-run card: the arrow marks the next command —
+    doctor --fix before storage exists, guide afterwards (CEO F2b).
+    The three steps never move; only the arrow does, so the card shape
+    stays stable for users and tests alike."""
+    lines = [WELCOME_HEAD[lang].format(version=__version__)]
+    for command, description in WELCOME_STEPS[lang]:
+        is_next = (command == "ipo doctor --fix" and not initialized) or (
+            command == "ipo guide" and initialized
+        )
+        mark = f"  {WELCOME_ARROW[lang]}" if is_next else ""
+        lines.append(f"  {command}    {description}{mark}")
+    lines.append("")
+    lines.append(WELCOME_TAIL[lang])
+    return "\n".join(lines)
+
 
 @dataclass
 class CheckOutcome:
@@ -74,6 +125,8 @@ def collect_command_docs() -> list[dict]:
 
 @click.group(
     context_settings={"help_option_names": ["-h", "--help"]},
+    invoke_without_command=True,
+    no_args_is_help=False,
     epilog="Docs: docs/ in the repository, or run `ipo guide`.",
 )
 @click.version_option(__version__, prog_name="ipo")
@@ -81,7 +134,8 @@ def collect_command_docs() -> list[dict]:
               help="path to settings.toml (overrides IPO_CONFIG)")
 @click.option("--data-dir", "data_dir", type=click.Path(), default=None,
               help="data directory (overrides IPO_DATA_DIR)")
-def cli(config_path: str | None, data_dir: str | None) -> None:
+@click.pass_context
+def cli(ctx: click.Context, config_path: str | None, data_dir: str | None) -> None:
     """ipostudio command line interface."""
     _force_utf8_streams()
     # CLI flags translate to the bootstrap env vars before any config load;
@@ -90,6 +144,8 @@ def cli(config_path: str | None, data_dir: str | None) -> None:
         os.environ["IPO_CONFIG"] = config_path
     if data_dir:
         os.environ["IPO_DATA_DIR"] = data_dir
+    if ctx.invoked_subcommand is None:
+        click.echo(_welcome_text(_welcome_lang(), _welcome_initialized()))
 
 
 @cli.command()
