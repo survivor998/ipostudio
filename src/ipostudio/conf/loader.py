@@ -146,6 +146,25 @@ def coerce_value(key: str, raw: str) -> Any:
         raise ConfigError(
             [f"unknown config key: {key}{suggest_key(key)}; see `ipo config list`"]
         )
+    stripped = raw.strip()
+    if stripped.startswith("["):
+        import json
+
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            pass  # malformed JSON: _coerce_env raises the normalizing error
+        else:
+            # pre-parse check (Codex ENG acceptance-b): _coerce_env str()-ifies
+            # JSON array elements (loader's env-path legacy), so [null, {...}]
+            # would otherwise be silently accepted as ["None", "{'x': 1}"]
+            if isinstance(parsed, list) and any(
+                not isinstance(item, str) for item in parsed
+            ):
+                raise ConfigError(
+                    [(f"{key}: JSON array elements must all be strings; got a "
+                      f"non-string element in {raw!r}; quote every element")]
+                )
     try:
         coerced = _coerce_env(
             f"IPO_{key.upper()}", raw, _annotation(FLAT_KEYS[key], key),
@@ -172,7 +191,10 @@ def coerce_value(key: str, raw: str) -> Any:
 
 
 def file_key_names(path: Path) -> set[str]:
-    """Keys explicitly present in the settings file (source tracking)."""
+    """Keys explicitly present in the settings file (source tracking).
+
+    Every explicitly-present file key is returned, including non-config ones
+    like ``config_version`` -- callers filter against FLAT_KEYS."""
     return set(_read_toml(path))
 
 

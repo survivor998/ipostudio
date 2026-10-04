@@ -390,6 +390,16 @@ def test_coerce_value_reports_undeclarable_values_as_config_error():
     assert '["a", "b"]' in str(excinfo.value)  # remediation carries an example
 
 
+def test_coerce_value_rejects_non_string_json_array_elements():
+    # Codex ENG acceptance-b: a public CLI write surface must reject
+    # [null, {...}] instead of silently stringifying it (["None", "{'x': 1}"])
+    with pytest.raises(ConfigError) as excinfo:
+        coerce_value("model_dirs", '[null, {"x": 1}]')
+    message = str(excinfo.value)
+    assert "JSON array elements must all be strings" in message
+    assert "model_dirs" in message
+
+
 def test_file_key_names_reports_explicit_keys(tmp_path):
     settings = tmp_path / "settings.toml"
     settings.write_text('ui_lang = "en"\n', encoding="utf-8")
