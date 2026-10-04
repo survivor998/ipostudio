@@ -1,3 +1,4 @@
+# Python build/test artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,6 +7,42 @@ __pycache__/
 build/
 dist/
 .venv/
-.superpowers/
+
+# Secrets and credentials — never commit real keys, tokens or env files
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+credentials*.json
+*.secrets.*
+
+# Local databases and logs — real user data lives in the data dir, never here
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+.claude/settings.local.json
+
+# Proprietary spec and local assistant/session artifacts
 Functional Specification v1.0.md
+.superpowers/
 .gstack/
