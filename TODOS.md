@@ -101,3 +101,23 @@
 - **Effort:** human: S / CC: S
 - **Priority:** P3
 - **Depends on:** 产品决策
+
+## TODO-012: 非可选配置键的 CLI 重置（泛化 `config set KEY none`）
+- **What:** 让 `ipo config set KEY none` 对非 Optional 键的语义从"拒绝"泛化为"删除文件中的显式键→回落 schema 默认"；或提供 `ipo config unset KEY`。
+- **Why:** 2026-10-04 Eng 审查（DX F4/Codex 记录）：用户保存 `server_port = 19000` 后无法经 CLI 回到默认 18080；现路径 = 手工编辑 settings.toml（`ipo config path` 可发现）。这是人体工学层唯一无法表达的写操作。
+- **Pros:** 配置读写闭环；消除"只能手编文件"的断点。
+- **Cons:** `none` 对可选键=清空、对非可选键=重置的双语义需要清晰的文案与测试；与 loader 的脏键合并写交互需验证。
+- **Context:** 来源见 docs/superpowers/plans/2026-10-04-cli-ux-ergonomics.md 的 Out-of-scope 与 ENG 记录；spec §9.12 只要求 path/get/set/list，故本轮不扩。宜与核心回路计划的 config 面一并做。
+- **Effort:** human: S / CC: S
+- **Priority:** P3
+- **Depends on:** CLI UX 计划（config 命令族）落地
+
+## TODO-013: `ipo guide` 递归收集子命令用法与参数表
+- **What:** `collect_command_docs()` 目前只遍历顶层命令；扩展为递归收集 click 组的子命令参数、类型、范围与可复制示例（覆盖 PowerShell 与 POSIX 两种引号形态），并在 zh/en 下诚实标注实际翻译覆盖面。
+- **Why:** 2026-10-04 DX/Eng 审查（Codex DX #5、ENG F7、Codex ENG #7）：`config` 组 docstring 罗列四个名字无法生成 `KEY VALUE` 用法；两分钟文档发现目标缺支撑。
+- **Pros:** guide 成为完整参考；`ipo help --format markdown/json` 自动受益。
+- **Cons:** 递归渲染器 + 三种格式的快照测试；枚举值范围需从 pydantic schema 提取。
+- **Context:** 本轮以组 docstring + README 示例覆盖最低需求；完整参考生成归核心回路计划后的文档轮。
+- **Effort:** human: M / CC: S
+- **Priority:** P3
+- **Depends on:** CLI UX 计划落地；宜在 TODO-001（补全）同期
