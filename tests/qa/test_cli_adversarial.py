@@ -90,7 +90,7 @@ def test_usage_errors_exit_2_and_version_exit_0():
 
     result_cmd = invoke("definitely-not-a-command")
     assert result_cmd.exit_code == 2
-    assert "no such command" in result_cmd.stderr.lower()
+    assert "unknown command" in result_cmd.stderr.lower()
 
     result_arg = invoke("version", "unexpected-arg")
     assert result_arg.exit_code == 2

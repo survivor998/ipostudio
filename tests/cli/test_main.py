@@ -625,3 +625,30 @@ def test_welcome_card_only_references_registered_commands():
         for command, _ in template:
             name = command.split()[1]
             assert name in cli.commands, f"welcome card references missing command: {name}"
+
+
+def test_typo_command_suggests_closest_match():
+    result = invoke("docter")
+    assert result.exit_code == 2  # usage error contract preserved
+    assert "unknown command 'docter'" in all_output(result)
+    assert "did you mean 'doctor'?" in all_output(result)
+    assert "ipo --help" in all_output(result)
+
+
+def test_typo_help_is_recovered_too():
+    result = invoke("hepl")
+    assert result.exit_code == 2
+    assert "did you mean 'help'?" in all_output(result)
+
+
+def test_distant_command_gets_no_suggestion_but_discovery_hint():
+    result = invoke("zzznotacommand")
+    assert result.exit_code == 2
+    assert "unknown command 'zzznotacommand'" in all_output(result)
+    assert "did you mean" not in all_output(result)
+    assert "ipo --help" in all_output(result)
+
+
+def test_valid_commands_still_resolve():
+    assert invoke("version").exit_code == 0
+    assert invoke("help").exit_code == 0

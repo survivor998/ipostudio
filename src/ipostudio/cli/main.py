@@ -123,7 +123,32 @@ def collect_command_docs() -> list[dict]:
     return docs
 
 
+class _SuggestingGroup(click.Group):
+    """Turn unknown-command errors into actionable ones and keep every
+    click-rendered surface under the presentation color gate.  The UsageError
+    contract (exit code 2) is preserved — only the message improves."""
+
+    def make_context(self, info_name, args, parent=None, **extra):
+        # eager --help exits during parsing, before any callback runs: the
+        # color gate must be applied at context construction (DX F6)
+        extra.setdefault("color", use_color())
+        return super().make_context(info_name, args, parent=parent, **extra)
+
+    def resolve_command(self, ctx: click.Context, args: list[str]):
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError as exc:
+            name = args[0] if args else ""
+            hint = suggest_key(name, pool=self.commands)
+            # ctx=ctx keeps click's usage block on the rewritten error (ENG F6)
+            raise click.UsageError(
+                f"unknown command {name!r}{hint}; run `ipo --help` to list commands",
+                ctx=ctx,
+            ) from exc
+
+
 @click.group(
+    cls=_SuggestingGroup,
     context_settings={"help_option_names": ["-h", "--help"]},
     invoke_without_command=True,
     no_args_is_help=False,
@@ -490,7 +515,7 @@ def doctor(as_json: bool, repair: bool) -> None:
         sys.exit(1)
 
 
-@cli.group()
+@cli.group(cls=_SuggestingGroup)
 def config() -> None:
     """Read and write settings (subcommands: path, get, set, list)."""
 
