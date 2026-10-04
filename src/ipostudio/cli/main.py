@@ -201,6 +201,18 @@ def _check_database(repair: bool) -> CheckOutcome:
             "database", True,
             f"not initialized yet ({db_path}); run with --fix or start the app",
         )
+    if db_path.is_dir():
+        # A directory cannot be a database, but how sqlite fails on one is
+        # platform-dependent (Windows: CANTOPEN; POSIX: open(dir, O_RDONLY)
+        # succeeds and the header read yields an IOERR-class error that the
+        # code-based classification below would report as a hard failure).
+        # Route it to the same guided PASS on every platform (first CI run).
+        return CheckOutcome(
+            "database", True,
+            f"cannot inspect read-only ({db_path} is a directory, not a "
+            f"database file); check IPO_DB_PATH or run `ipo doctor --fix` "
+            f"for a writable check",
+        )
     try:
         # read-only inspection: default doctor must not touch an existing
         # database (no WAL pragma, no migration). --fix repairs explicitly.

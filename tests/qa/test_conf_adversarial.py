@@ -609,16 +609,25 @@ def test_paths_whitespace_overrides_fallback_and_layout(tmp_path):
 def test_save_fsyncs_temp_file_before_replace(tmp_path, monkeypatch):
     """Regression H-02: the temp file must hit the disk (fsync) BEFORE
     os.replace, or a power loss can persist the rename with empty/truncated
-    settings.toml (LWN 457667)."""
+    settings.toml (LWN 457667).  Only FILE fsyncs are recorded: save() also
+    issues a best-effort directory fsync after the rename on POSIX (first CI
+    run), which is a different durability surface, not part of this order."""
     from ipostudio.conf import loader as loader_mod
 
     order = []
     real_fsync = os.fsync
     real_replace = os.replace
-    monkeypatch.setattr(
-        loader_mod.os, "fsync",
-        lambda fd: (order.append("fsync"), real_fsync(fd))[1],
-    )
+
+    def recording_fsync(fd):
+        try:
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                return real_fsync(fd)  # directory-entry durability, not a file
+        except OSError:
+            pass
+        order.append("fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(loader_mod.os, "fsync", recording_fsync)
     monkeypatch.setattr(
         loader_mod.os, "replace",
         lambda src, dst: (order.append("replace"), real_replace(src, dst))[1],
