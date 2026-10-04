@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -12,6 +13,14 @@ from ipostudio.cli.main import cli
 
 def invoke(*args):
     return CliRunner().invoke(cli, list(args))
+
+
+def all_output(result):
+    """stdout + stderr across click 8.1/8.2 runner semantics."""
+    try:
+        return result.output + result.stderr
+    except ValueError:  # click 8.1: stderr merged into output already
+        return result.output
 
 
 @pytest.fixture
@@ -309,3 +318,87 @@ def test_doctor_force_color_survives_a_real_pipe(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert b"\x1b[32m[PASS]" in proc.stdout  # ANSI survived the pipe
+
+
+def test_config_path_prints_resolved_settings_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "path")
+    assert result.exit_code == 0
+    assert str(tmp_path / "settings.toml") in result.output
+    payload = json.loads(invoke("config", "path", "--json").output)
+    assert payload == {"path": str(tmp_path / "settings.toml")}
+
+
+def test_config_get_reports_effective_value_with_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    assert invoke("config", "get", "server_port").output.strip() == "18080"
+    monkeypatch.setenv("IPO_SERVER_PORT", "19000")
+    assert invoke("config", "get", "server_port").output.strip() == "19000"
+
+
+def test_config_get_optional_unset_key_reads_not_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    assert invoke("config", "get", "local_model_path").output.strip() == "(not set)"
+
+
+def test_config_get_empty_string_default_reads_not_set(tmp_path, monkeypatch):
+    # schema default of vllm_api_base is "": a blank line would be
+    # indistinguishable from a broken command (DX F1) — get matches list
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    assert invoke("config", "get", "vllm_api_base").output.strip() == "(not set)"
+    payload = json.loads(invoke("config", "get", "vllm_api_base", "--json").output)
+    assert payload["value"] == ""  # --json stays raw: machine truth
+
+
+def test_config_get_json_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    payload = json.loads(invoke("config", "get", "ui_lang", "--json").output)
+    assert payload == {"key": "ui_lang", "family": "ui", "value": "zh"}
+
+
+def test_config_get_unknown_key_exits_1_with_suggestion(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "get", "ui_them")
+    assert result.exit_code == 1
+    assert "unknown config key" in all_output(result)
+    assert "ui_theme" in all_output(result)
+    assert "ipo config list" in all_output(result)
+
+
+def test_config_get_refuses_credential_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "get", "vllm_api_key")
+    assert result.exit_code == 1
+    assert "IPO_VLLM_API_KEY" in all_output(result)
+    assert "never displayed" in all_output(result)
+
+
+def test_config_get_reports_broken_settings_with_origin(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.toml").write_text("bogus_key = 1\n", encoding="utf-8")
+    result = invoke("config", "get", "server_port")
+    assert result.exit_code == 1
+    assert "bogus_key" in all_output(result)
+
+
+def test_config_get_masks_url_credential_values(tmp_path, monkeypatch):
+    # read-side guard: load_config accepts env values the write path rejects —
+    # a proxied credential must never reach get's text or JSON channel (Codex ENG #1)
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("IPO_PROXY_URL", "http://alice:secret@proxy.example.com")
+    result = invoke("config", "get", "proxy_url")
+    assert result.exit_code == 0
+    assert "alice" not in result.output and "secret" not in result.output
+    assert "(not set)" not in result.output  # masked, not treated as unset
+    assert result.output.strip() == "***"
+    payload = json.loads(invoke("config", "get", "proxy_url", "--json").output)
+    assert payload["value"] == "***"
+
+
+def test_config_path_absolutizes_relative_override(tmp_path, monkeypatch, _restore_bootstrap_env):
+    # IPO_CONFIG may be relative (cwd-anchored); the display contract is absolute (Codex ENG #6)
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("IPO_CONFIG", "relative-settings.toml")
+    payload = json.loads(invoke("config", "path", "--json").output)
+    assert Path(payload["path"]).is_absolute()
+    assert payload["path"].endswith("relative-settings.toml")

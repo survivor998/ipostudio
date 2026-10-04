@@ -6,13 +6,26 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 
 from ipostudio import __version__
 from ipostudio.cli.ui import check_line, use_color
-from ipostudio.conf.loader import ConfigError, load_config
-from ipostudio.conf.paths import ensure_layout, resolve_data_dir, resolve_db_path
+from ipostudio.conf.loader import (
+    CREDENTIAL_KEYS,
+    ConfigError,
+    _contains_url_credential,
+    load_config,
+    suggest_key,
+)
+from ipostudio.conf.paths import (
+    ensure_layout,
+    resolve_config_path,
+    resolve_data_dir,
+    resolve_db_path,
+)
+from ipostudio.conf.schema import FLAT_KEYS
 from ipostudio.logs import log_file_path
 from ipostudio.store.database import migrate, open_db
 
@@ -416,3 +429,86 @@ def doctor(as_json: bool, repair: bool) -> None:
             click.echo(f"summary: {passed} passed.")
     if failed:
         sys.exit(1)
+
+
+@cli.group()
+def config() -> None:
+    """Read and write settings (subcommands: path, get, set, list)."""
+
+
+def _format_value(value: Any) -> str:
+    """Human text form: None and "" as "(not set)", strings raw, rest JSON.
+    "" must not render as a blank line (DX F1) — the text channel matches
+    `config list`; `--json` stays raw because "" is the machine truth."""
+    if value is None or value == "":
+        return "(not set)"
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _print_config_errors(exc: ConfigError) -> None:
+    for detail in exc.details:
+        click.echo(f"error: {detail}", err=True)
+
+
+def _mask_url_credentials(value: Any) -> Any:
+    """Mask any value carrying an inline URL credential before it reaches a
+    display channel (Codex ENG #1): load_config accepts env/file values the
+    write path would reject, so get/list need a READ-side guard mirroring the
+    store's value-based policy — name blacklists alone cannot uphold it."""
+    if _contains_url_credential(value):
+        return "***"
+    return value
+
+
+@config.command()
+@click.option("--json", "as_json", is_flag=True, help="emit machine-readable output")
+def path(as_json: bool) -> None:
+    """Show the settings file location."""
+    target = resolve_config_path()
+    # IPO_CONFIG may legally be relative (cwd-anchored); the display contract
+    # is an absolute path, so absolutize for display only (Codex ENG #6).
+    # .absolute() is cwd-anchored absolutization with NO symlink resolution —
+    # resolving would rewrite the displayed path on symlinked temp dirs
+    # (macOS /var -> /private/var) and break path-pinning tests; the
+    # platform-hygiene guard keeps legacy path helpers out of src/, hence
+    # the pathlib form.
+    absolute = target.absolute()
+    if as_json:
+        click.echo(json.dumps({"path": str(absolute)}, ensure_ascii=False))
+    else:
+        click.echo(str(absolute))
+
+
+@config.command()
+@click.argument("key")
+@click.option("--json", "as_json", is_flag=True, help="emit machine-readable output")
+def get(key: str, as_json: bool) -> None:
+    """Show one setting's effective value (env > file > default)."""
+    if key in CREDENTIAL_KEYS:
+        click.echo(
+            f"error: {key} is credential-shaped and never displayed; read it "
+            f"from the environment (IPO_{key.upper()}) instead",
+            err=True,
+        )
+        sys.exit(1)
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        _print_config_errors(exc)
+        sys.exit(1)
+    family = FLAT_KEYS.get(key)
+    if family is None:
+        click.echo(
+            f"error: unknown config key: {key}{suggest_key(key)}; see `ipo config list`",
+            err=True,
+        )
+        sys.exit(1)
+    value = _mask_url_credentials(getattr(getattr(cfg, family), key))
+    if as_json:
+        click.echo(
+            json.dumps({"key": key, "family": family, "value": value}, ensure_ascii=False)
+        )
+    else:
+        click.echo(_format_value(value))
