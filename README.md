@@ -36,9 +36,10 @@ read values with `ipo config get KEY`, write them with `ipo config set KEY VALUE
     ipo config set model_dirs '["D:/models", "/data/models"]'   # list (JSON)
     ipo config set local_model_path none      # clear an optional key
 
-Negative numbers need click's `--` separator (e.g. `ipo config set server_temp
--- -0.5`); if a shell environment already overrides a key, saving still works
-but the env value wins until you unset it (the command warns on stderr).
+A value that starts with a dash needs click's `--` separator before it (e.g.
+`ipo config set vllm_api_base -- -stage-endpoint`); if a shell environment
+already overrides a key, saving still works but the env value wins until you
+unset it (the command warns on stderr).
 
 Saving scrubs any hand-written credential keys from the file — pass API keys
 via the environment instead, e.g. IPO_VLLM_API_KEY. Resetting a non-optional
