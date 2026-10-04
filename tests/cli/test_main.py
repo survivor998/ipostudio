@@ -402,3 +402,83 @@ def test_config_path_absolutizes_relative_override(tmp_path, monkeypatch, _resto
     payload = json.loads(invoke("config", "path", "--json").output)
     assert Path(payload["path"]).is_absolute()
     assert payload["path"].endswith("relative-settings.toml")
+
+
+def test_config_set_validates_saves_and_roundtrips(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "set", "server_port", "19000")
+    assert result.exit_code == 0, result.output
+    assert "server_port = 19000" in result.output
+    assert f"(saved to {tmp_path / 'settings.toml'})" in result.output  # save() returns Path
+    saved = json.loads(invoke("config", "get", "server_port", "--json").output)
+    assert saved["value"] == 19000
+    raw = (tmp_path / "settings.toml").read_text(encoding="utf-8")
+    assert "server_port = 19000" in raw
+
+
+def test_config_set_string_value_persists_raw_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "set", "ui_theme", "dark")
+    assert result.exit_code == 0, result.output
+    assert invoke("config", "get", "ui_theme").output.strip() == "dark"
+
+
+def test_config_set_env_override_warns_but_saves(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("IPO_SERVER_PORT", "19999")
+    result = invoke("config", "set", "server_port", "19000")
+    assert result.exit_code == 0, result.output
+    assert "warning: IPO_SERVER_PORT is set in this shell" in all_output(result)
+    try:
+        # click 8.2+: stderr is a separate stream — the warning must be there,
+        # and must NOT pollute stdout (DX F7); on 8.1 (merged streams, accessing
+        # result.stderr raises ValueError) the isolation is untestable — skip
+        # (click 8.2+ deviation: Result.output MIXES both streams, so the
+        # stdout-only channel is Result.stdout — the DX F7 instrument here)
+        assert "warning: IPO_SERVER_PORT" not in result.stdout
+        assert "warning: IPO_SERVER_PORT" in result.stderr
+    except ValueError:
+        pass
+    # the shell override still wins until it is unset
+    assert invoke("config", "get", "server_port").output.strip() == "19999"
+
+
+def test_config_set_rejects_invalid_value_without_save(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "set", "server_port", "99999")
+    assert result.exit_code == 1
+    assert "error:" in all_output(result)
+    assert not (tmp_path / "settings.toml").exists()  # rejected: nothing written
+
+
+def test_config_set_rejects_credential_keys_with_env_hint(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "set", "vllm_api_key", "sk-abc123def456ghi789")
+    assert result.exit_code == 1
+    assert "sk-abc123def456ghi789" not in all_output(result)  # secret never echoed
+    assert "IPO_VLLM_API_KEY" in all_output(result)
+    assert not (tmp_path / "settings.toml").exists()
+
+
+def test_config_set_rejects_inline_url_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("config", "set", "proxy_url", "https://Alice:Secret@example.com")
+    assert result.exit_code == 1
+    assert "environment variable" in all_output(result)
+
+
+def test_config_set_none_clears_optional_setting(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    assert invoke("config", "set", "local_model_path", "abc").exit_code == 0
+    result = invoke("config", "set", "local_model_path", "none")
+    assert result.exit_code == 0, result.output
+    raw = (tmp_path / "settings.toml").read_text(encoding="utf-8")
+    assert "local_model_path" not in raw  # cleared, not written as null
+
+
+def test_config_set_on_broken_baseline_reports_and_exits_1(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.toml").write_text("bogus_key = 1\n", encoding="utf-8")
+    result = invoke("config", "set", "server_port", "19000")
+    assert result.exit_code == 1
+    assert "bogus_key" in all_output(result)

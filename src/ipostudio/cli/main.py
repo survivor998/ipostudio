@@ -15,7 +15,9 @@ from ipostudio.cli.ui import check_line, use_color
 from ipostudio.conf.loader import (
     CREDENTIAL_KEYS,
     ConfigError,
+    ConfigStore,
     _contains_url_credential,
+    coerce_value,
     load_config,
     suggest_key,
 )
@@ -512,3 +514,36 @@ def get(key: str, as_json: bool) -> None:
         )
     else:
         click.echo(_format_value(value))
+
+
+@config.command(name="set")
+@click.argument("key")
+@click.argument("value")
+def set_value(key: str, value: str) -> None:
+    """Validate and persist one setting; VALUE 'none' clears an optional key."""
+    try:
+        typed = coerce_value(key, value)
+        cfg = load_config()
+    except ConfigError as exc:
+        _print_config_errors(exc)
+        sys.exit(1)
+    store = ConfigStore(resolve_config_path(), cfg)
+    try:
+        # set() 先做策略校验，再在候选副本上验证，并把归一化后的值写回 cfg
+        # 的对应 family section（loader.py 的 setattr）——因此下方成功行展示
+        # 的就是已保存的归一化值，无需重读文件
+        store.set(key, typed)
+        saved = store.save()
+    except ConfigError as exc:
+        _print_config_errors(exc)
+        sys.exit(1)
+    env_var = f"IPO_{key.upper()}"
+    if env_var in os.environ:
+        # stderr: a warning must not pollute the machine-facing stdout (DX F7)
+        click.echo(
+            f"warning: {env_var} is set in this shell; it overrides the saved "
+            f"value until you unset it",
+            err=True,
+        )
+    current = getattr(getattr(cfg, FLAT_KEYS[key]), key)
+    click.echo(f"{key} = {_format_value(current)} (saved to {saved})")
