@@ -1,4 +1,3 @@
-<!-- /autoplan restore point: "<user-local>\\.gstack\\projects\\ipostudio\\no-branch-autoplan-restore-20261003-105528.md" -->
 ## Implementation plan
 # P1 核心基础（core-foundation）实现计划
 
@@ -2662,7 +2661,7 @@ COVERAGE: 43 计划内测试全映射（48+1=49 计数一致）；GAPS: 2（whee
 LLM/EVAL: 无（P1 无模型调用）
 ```
 
-**测试计划工件**：已写 `~/.gstack/projects/ipostudio/no-branch-eng-review-test-plan-<ts>.md`（见下）。
+**测试计划工件**：已写 `<gstack project dir>/eng-review-test-plan-<ts>.md`（见下）。
 
 **Section 4 性能**：无 N+1（单文件读）；内存峰值 = settings 全量字典（<100 键）+ 单条日志缓冲；缓存不适用；慢路径 = doctor ro 打开（同步目录降级路径已护）；busy_timeout 5s/锁 5s 上限防挂死。无发现。
 

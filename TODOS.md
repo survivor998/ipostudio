@@ -36,13 +36,13 @@
 - **Priority:** P1（优先级），时序 P3 前
 - **Depends on:** P1 Task 5
 
-## TODO-006: 选定开源许可证（公开仓库前必须）
+## TODO-006: 选定开源许可证（公开仓库前必须）——已解决
 - **What:** 在 Apache-2.0（审查推荐）与 MIT 之间选定并提交 LICENSE 全文；同步 pyproject 元数据。
-- **Why:** 用户 2026-10-03 裁决：仓库暂私有、暂不选许可证；公开发布/分发前的硬前提（洁净室 IP 姿态要求严谨）。
-- **Context:** 最终审批门 B2 裁决记录。
+- **Resolution:** 2026-10-04 用户以 **MIT** 初始化公开仓库 https://github.com/survivor998/ipostudio （GitHub 初始提交自带 LICENSE），pyproject 已同步 `license = "MIT"`。此项即用户本人对"择日决定"的裁决，登记于此备查。
+- **Context:** 用户 2026-10-03 裁决：仓库暂私有、暂不选许可证；2026-10-04 用户创建公开仓库并选择 MIT，推翻此前裁决。
 - **Effort:** human: S / CC: S
-- **Priority:** P1（公开前阻塞项）
-- **Depends on:** 用户择日决定
+- **Priority:** 已解决
+- **Depends on:** —
 
 ## TODO-005: wheel 构建与仓库外安装冒烟（M0 期间）
 - **What:** `python -m build` 产 wheel，在仓库外 venv 安装并跑 `ipo doctor --json`（验证 SQL 迁移资源打包）。

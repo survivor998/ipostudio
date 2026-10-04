@@ -22,4 +22,4 @@ Key routing rules:
 - Resume context → invoke /context-restore
 - Author a backlog-ready spec/issue → invoke /spec
 
-If B: run `<user-local>/.claude/skills/gstack/bin/gstack-config set routing_declined true` — N/A (user chose A).
+If B: run `gstack-config set routing_declined true` — N/A (user chose A).
