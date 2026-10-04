@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from ipostudio import __version__
+from ipostudio.cli.ui import check_line, use_color
 from ipostudio.conf.loader import ConfigError, load_config
 from ipostudio.conf.paths import ensure_layout, resolve_data_dir, resolve_db_path
 from ipostudio.logs import log_file_path
@@ -384,6 +385,7 @@ def doctor(as_json: bool, repair: bool) -> None:
             )
         )
     else:
+        color = use_color()
         for outcome in outcomes:
             mark = "[PASS]" if outcome.ok else "[FAIL]"
             # long multi-error details are truncated for the terminal with a
@@ -391,8 +393,26 @@ def doctor(as_json: bool, repair: bool) -> None:
             shown = outcome.detail
             if len(shown) > 300:
                 shown = shown[:300] + f" ...(+{len(outcome.detail) - 300} chars; use --json)"
-            click.echo(f"{mark} {outcome.name}: {shown}")
+            # color passthrough: without it click.echo strips the ANSI that
+            # paint() added whenever the stream is not a tty, which would
+            # silently neutralize FORCE_COLOR end-to-end (Codex ENG #3)
+            click.echo(check_line(mark, outcome.name, shown, color=color), color=color)
         for warning in warnings:
-            click.echo(f"[WARN] config: {warning}")
+            click.echo(check_line("[WARN]", "config", warning, color=color), color=color)
+        passed = len(outcomes) - len(failed)
+        if failed:
+            names = ", ".join(outcome.name for outcome in failed)
+            click.echo(
+                f"summary: {passed} passed, {len(failed)} failed ({names}); follow the "
+                f"guidance in the failed checks above, or re-run with --fix to repair "
+                f"storage problems (--json gives full detail)"
+            )
+        elif repair:
+            click.echo(
+                f"summary: {passed} passed (repair mode); storage is ready — "
+                f"try `ipo guide` next"
+            )
+        else:
+            click.echo(f"summary: {passed} passed.")
     if failed:
         sys.exit(1)

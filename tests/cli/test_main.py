@@ -239,3 +239,56 @@ def test_doctor_readonly_failure_detail_names_db_path(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "[FAIL] database" in result.output
     assert str(db) in result.output  # error contract: origin path in detail
+
+
+def test_doctor_text_output_has_summary_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("doctor")
+    assert result.exit_code == 0
+    assert "summary: 4 passed." in result.output
+
+
+def test_doctor_failure_summary_names_failed_checks(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.toml").write_text("bogus_key = 1\n", encoding="utf-8")
+    result = invoke("doctor")
+    assert result.exit_code == 1
+    assert "summary: 3 passed, 1 failed (config)" in result.output
+
+
+def test_doctor_fix_success_suggests_guide_next(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = invoke("doctor", "--fix")
+    assert result.exit_code == 0
+    assert "summary: 4 passed (repair mode)" in result.output
+    assert "ipo guide" in result.output
+
+
+def test_doctor_color_wiring_reaches_check_lines(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main, "use_color", lambda: True)
+    result = CliRunner().invoke(cli, ["doctor"], color=True)
+    assert result.exit_code == 0
+    assert "\x1b[32m[PASS]" in result.output
+
+
+def test_doctor_json_output_stays_unstyled(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main, "use_color", lambda: True)
+    result = CliRunner().invoke(cli, ["doctor", "--json"], color=True)
+    assert result.exit_code == 0
+    assert "\x1b[" not in result.output  # --json is machine-readable: never styled
+    json.loads(result.output)
+
+
+def test_doctor_truncates_long_details_with_json_pointer(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    long_detail = "x" * 400
+    monkeypatch.setattr(
+        cli_main, "run_doctor",
+        lambda repair: ([cli_main.CheckOutcome("config", False, long_detail)], []),
+    )
+    result = invoke("doctor")
+    assert "(+100 chars; use --json)" in result.output  # text channel truncates
+    payload = json.loads(invoke("doctor", "--json").output)
+    assert payload["checks"][0]["detail"] == long_detail  # --json always full
