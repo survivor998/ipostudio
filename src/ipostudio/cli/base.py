@@ -69,8 +69,25 @@ def open_db_only() -> sqlite3.Connection:
     """Migrated database without loading settings.toml (Codex recovery fold):
     stop/status/list/info must work even when the config file is broken —
     a user must always be able to stop what they started."""
-    conn = open_db(resolve_db_path())
-    migrate(conn)
+    try:
+        conn = open_db(resolve_db_path())
+        migrate(conn)
+    except sqlite3.Error as exc:
+        click.echo(
+            f"error: database unavailable ({exc}); run `ipo doctor --fix` and retry",
+            err=True,
+        )
+        sys.exit(1)
+    except OSError as exc:
+        # ENG F16: an unreadable data dir (permissions) must meet the same
+        # error contract, not a traceback — these are exactly the recovery
+        # surfaces where a raw crash costs the user the most
+        click.echo(
+            f"error: cannot access the data directory ({exc}); check "
+            f"permissions, then run `ipo doctor --fix`",
+            err=True,
+        )
+        sys.exit(1)
     return conn
 
 

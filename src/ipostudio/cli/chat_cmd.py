@@ -65,7 +65,9 @@ def chat(prompt: str, timeout_s: float) -> None:
             _record_failure(conn, instance, prompt, started,
                             "malformed response payload")
             _fail("server returned a malformed response payload "
-                  "(choices[0].message.content must be a string)")
+                  "(choices[0].message.content must be a string); check "
+                  "`ipo server logs` for the engine output and `ipo status` "
+                  "for its health")
         record_completion(
             conn, instance_id=instance["id"],
             model_name=instance["model_name"],

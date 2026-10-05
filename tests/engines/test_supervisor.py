@@ -71,14 +71,25 @@ def test_probe_health_sees_real_503_as_loading(tmp_path):
     import subprocess
 
     port = choose_port("127.0.0.1", 18800)
+    # the delay must comfortably exceed interpreter startup, or the first
+    # successful probe could jump past the 503 window straight to "ok"
     proc = subprocess.Popen(
         [sys.executable, str(FAKE), "--host", "127.0.0.1", "--port", str(port),
-         "--load-delay", "1.5"],
+         "--load-delay", "3"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        assert probe_health("127.0.0.1", port, 1.0) == "loading"
+        # the spawn races the fake server's own interpreter startup: an
+        # immediate probe can hit the unbound port and read "down" on a slow
+        # start (the suite's one real flake) — poll until the port answers
+        # at all, bounded, then pin the observed mapping
+        state = probe_health("127.0.0.1", port, 1.0)
         deadline = time.monotonic() + 5
+        while state == "down" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            state = probe_health("127.0.0.1", port, 1.0)
+        assert state == "loading"
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline and probe_health(
             "127.0.0.1", port, 0.5
         ) != "ok":

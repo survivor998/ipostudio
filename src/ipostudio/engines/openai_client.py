@@ -47,7 +47,8 @@ def chat_completion(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise ChatError(
-            f"server returned HTTP {exc.code}: {redact_unambiguous(detail)}"
+            f"server returned HTTP {exc.code}: {redact_unambiguous(detail)}; "
+            f"check `ipo server logs` for the engine output"
         ) from exc
     except urllib.error.URLError as exc:
         raise ChatError(

@@ -150,10 +150,15 @@ def _run_start(conn, cfg, model_name: str | None, host: str | None,
             f"loopback unless you accept that",
             err=True,
         )
-    argv = build_server_argv(
-        engine_path, Path(model["path"]), host, port, cfg.tuning,
-        cfg.engines.llama_cpp_extra_args,
-    )
+    try:
+        argv = build_server_argv(
+            engine_path, Path(model["path"]), host, port, cfg.tuning,
+            cfg.engines.llama_cpp_extra_args,
+        )
+    except ValueError as exc:
+        # managed-flag rejection must meet the error contract at the command
+        # seam too: start/start-shorthand and both restarts share this path
+        _fail(str(exc))
     log_path = engine_log_path(resolve_data_dir())
     outcome = start_instance(
         conn, argv, engine="llama.cpp", model_name=model["name"],
@@ -231,13 +236,21 @@ def server_restart(model_name: str | None, timeout_s: float) -> None:
     try:
         # precheck BEFORE stopping (Codex DX fold): a bad request must not
         # cost the user a running server; --model stays temporary here —
-        # `ipo restart` is the persisting shorthand
+        # `ipo restart` is the persisting shorthand.  The precheck runs
+        # unconditionally: with no --model the start below still resolves the
+        # persisted selection, so a deleted active-model file must refuse
+        # while the old server is up, never after the stop (insert-only
+        # catalog: only the file check can catch the deletion)
         engine_path, problem = resolve_engine(cfg.engines.llama_cpp_path)
         if engine_path is None:
             _fail(problem)
-        if model_name is not None:
-            _resolve_model(conn, cfg, model_name)  # resolve-only precheck
-        stop_instance(conn)
+        _resolve_model(conn, cfg, model_name)  # resolve-only precheck
+        stopped = stop_instance(conn)
+        if stopped is not None and stopped["state"] != "stopped":
+            # identity guard refused the kill (Codex fold): report the
+            # refusal — the detail carries the manual-PID guidance — instead
+            # of walking into _run_start's circular "already running" hint
+            _fail(f"stop refused: {stopped['detail']}")
         _run_start(conn, cfg, model_name, None, None, timeout_s)
     finally:
         conn.close()
