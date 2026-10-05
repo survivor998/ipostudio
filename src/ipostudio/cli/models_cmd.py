@@ -14,6 +14,7 @@ import click
 from ipostudio.catalog.repo import find_model, list_models, upsert_models
 from ipostudio.catalog.scan import MAX_SCAN_ENTRIES, model_scan_roots, scan_model_files
 from ipostudio.cli.base import _fail, open_config_and_db
+from ipostudio.cli.ui import local_time
 from ipostudio.conf.loader import ConfigError, ConfigStore
 from ipostudio.conf.paths import resolve_config_path, resolve_data_dir
 
@@ -193,4 +194,5 @@ def model_info(name: str, as_json: bool) -> None:
     click.echo(f"format:   {row['format']} ({row['parts']} part(s))")
     click.echo(f"category: {row['category']}")
     click.echo(f"source:   {row['source']}")
-    click.echo(f"seen:     {row['first_seen']}")
+    # first_seen is stored UTC (ENG F9); rendered local for humans
+    click.echo(f"seen:     {local_time(row['first_seen'])}")

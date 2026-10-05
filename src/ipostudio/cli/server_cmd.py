@@ -25,6 +25,7 @@ from ipostudio.cli.base import (
     open_db_only,
 )
 from ipostudio.cli.models_cmd import activate_model
+from ipostudio.cli.ui import local_time
 from ipostudio.conf.loader import ConfigError
 from ipostudio.conf.paths import resolve_data_dir
 from ipostudio.engines.discovery import resolve_engine
@@ -325,10 +326,13 @@ def server_info(as_json: bool) -> None:
         _print_completion(completion)
 
 def _print_completion(completion: dict) -> None:
+    # created_at is stored UTC (ENG F9); humans read local time — the
+    # presentation layer converts (store UTC, localize on display)
+    created = local_time(completion["created_at"])
     click.echo(
         f"last completion: {completion['status']} "
         f"({completion['output_chars']} chars in {completion['duration_ms']} ms, "
-        f"{completion['created_at']})"
+        f"{created})"
     )
     # the stored exchange is the recall value of the record (CEO review):
     # what was asked and what the model answered, truncated for the terminal

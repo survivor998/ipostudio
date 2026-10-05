@@ -63,3 +63,24 @@ def test_check_line_formats_and_colors_known_marks():
     assert ui.check_line("[PASS]", "config", "ok", color=False) == "[PASS] config: ok"
     assert ui.check_line("[FAIL]", "db", "x", color=True).startswith("\x1b[31m[FAIL]\x1b[0m db: x")
     assert ui.check_line("[OTHER]", "db", "x", color=True) == "[OTHER] db: x"  # unknown mark: plain
+
+
+def test_local_time_renders_stored_utc_in_local_zone():
+    # phase-1 E2E finding: storage is UTC (SQLite datetime('now'), ENG F9),
+    # but humans read local time — the presentation helper converts.  The
+    # expected value is computed here with the stdlib semantics the contract
+    # pins (naive string -> UTC-aware -> local), independent of the helper.
+    from datetime import UTC, datetime
+
+    stored = "2026-10-05 11:26:03"
+    expected = (
+        datetime.strptime(stored, "%Y-%m-%d %H:%M:%S")
+        .replace(tzinfo=UTC)
+        .astimezone()
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+    assert ui.local_time(stored) == expected
+    assert ui.local_time(stored) == expected  # stable across calls
+    # malformed values pass through unchanged: diagnostics are never lost
+    assert ui.local_time("garbage") == "garbage"
+    assert ui.local_time("") == ""

@@ -11,11 +11,14 @@ platform is click's job, so no platform branching lives here (R1).
 import os
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import TextIO
 
 import click
 
 _MARK_COLORS: dict[str, str] = {"[PASS]": "green", "[FAIL]": "red", "[WARN]": "yellow"}
+
+_UTC_NAIVE_FORMAT = "%Y-%m-%d %H:%M:%S"  # SQLite datetime('now') shape (ENG F9)
 
 
 def use_color(env: Mapping[str, str] | None = None, stream: TextIO | None = None) -> bool:
@@ -45,3 +48,19 @@ def paint(text: str, fg: str | None, *, color: bool) -> str:
 def check_line(mark: str, name: str, detail: str, *, color: bool = False) -> str:
     """One doctor-style line: colored mark, check name, detail."""
     return f"{paint(mark, _MARK_COLORS.get(mark), color=color)} {name}: {detail}"
+
+
+def local_time(stored: str) -> str:
+    """Render a stored UTC timestamp in the user's local time.
+
+    Storage is deliberately UTC (SQLite ``datetime('now')``, ENG F9); humans
+    read local — best practice is to convert at the presentation layer, so
+    every human-facing timestamp goes through this helper while ``--json``
+    keeps the raw stored strings (machine-readable contract unchanged).
+    Malformed values render unchanged so diagnostics are never lost.
+    """
+    try:
+        moment = datetime.strptime(stored, _UTC_NAIVE_FORMAT).replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return stored
+    return moment.astimezone().strftime(_UTC_NAIVE_FORMAT)
