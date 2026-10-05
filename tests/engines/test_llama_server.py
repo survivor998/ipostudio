@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 from ipostudio.conf.schema import ServerTuning
 from ipostudio.engines.discovery import ENGINE_COMMAND, resolve_engine
 from ipostudio.engines.llama_server import build_server_argv
@@ -75,6 +77,30 @@ def test_argv_cpu_mode_pins_zero_layers_only_without_explicit_count():
     )
     assert both.count("--n-gpu-layers") == 1
     assert both[both.index("--n-gpu-layers") + 1] == "5"
+
+@pytest.mark.parametrize(
+    ("extra", "managed"),
+    [
+        (["--port", "1"], True),
+        (["--port=1"], True),
+        (["-m", "x"], True),
+        (["--model=y"], True),
+        (["--host=h"], True),
+        (["--ctx-size=1"], False),  # unmanaged: appended untouched
+    ],
+)
+def test_argv_rejects_managed_flags_in_extras(extra, managed):
+    def build():
+        return build_server_argv(
+            Path("engine"), Path("m.gguf"), "127.0.0.1", 18080, TUNING, extra
+        )
+
+    if managed:
+        with pytest.raises(ValueError) as err:
+            build()
+        assert "managed flag" in str(err.value)  # error contract: names the problem
+    else:
+        assert build()[-1] == "--ctx-size=1"
 
 def test_fake_engine_double_speaks_health_and_chat(tmp_path):
     """The fake engine is a subprocess contract: it must answer the two
