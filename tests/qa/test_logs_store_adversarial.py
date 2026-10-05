@@ -317,9 +317,13 @@ def test_migrate_concurrent_subprocesses_single_registration(tmp_path):
         ((out1, procs[0].returncode, err1), (out2, procs[1].returncode, err2))
         if rc == 0
     )
-    assert applied == [[], ["001_init.sql", "002_models.sql"]], (
-        "exactly one process applies the migrations"
-    )
+    assert applied in (
+        # one process wins both apply races before the other re-checks
+        [[], ["001_init.sql", "002_models.sql"]],
+        # each migration applies in its own transaction: the 001 loser passes
+        # its re-check (already registered) and can still win the 002 apply
+        [["001_init.sql"], ["002_models.sql"]],
+    ), f"each migration must be applied exactly once across processes, got: {applied}"
     conn = open_db(db)
     rows = conn.execute("SELECT name FROM _migrations ORDER BY id").fetchall()
     assert [r["name"] for r in rows] == ["001_init.sql", "002_models.sql"]
