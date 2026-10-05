@@ -4,6 +4,8 @@
 
 **Goal:** 用真实产品命令打通最小价值闭环——扫描本地 GGUF 模型（`ipo models`）→ 激活（`ipo model --select`）→ 启动 llama.cpp 服务（`ipo server start`）→ 一次补全（`ipo chat`）→ 记录落 SQLite 与日志 → 重启可查（`ipo status` / `ipo server info`）。
 
+**目标用户（Codex CEO 折叠）：** 熟悉终端、能自行安装 llama.cpp 并下载模型权重的本地 LLM 熟手；新手路径（引擎安装/模型下载引导）由 P2 下载器承接，本计划不以新人为验收对象。`ipo chat` 在本计划中定位为冒烟/诊断探针（单轮、非流式），交互式对话体验随 P6 流式与 NDJSON 事件落地（TODO-018）。
+
 **Architecture:** 引擎监督采用"CLI 进程即起即走 + SQLite 行即协调点"（ADR-004 的最小形态）：`ipo server start` spawn 引擎子进程后退出，引擎成为孤儿进程继续服务；后续 stop/status 在新进程里读数据库行 + 实时健康探测。状态机字面量取规格 §10.2 服务态，由数据库 CHECK 约束钉死。模型目录扫描与引擎发现均为纯函数层，CLI 只做编排。
 
 **Tech Stack:** Python ≥3.11 标准库（urllib/socket/sqlite3/subprocess/shutil）+ 既有 click 8 / pydantic v2 基座；**零新增运行时依赖**。
@@ -45,7 +47,7 @@
 - 退出码：成功 0；click 用法错误 2；运行失败 1（规格 §9.11"失败非零退出"）。
 - 错误契约（继承 CLI-UX 计划）：每条错误 = 问题 + 来源 + 修复指引；错误走 stderr；stdout 保持机器可解析。
 - `--json` 字节干净（无 ANSI、可 `json.loads`）；QA walker（`tests/qa/test_cli_ux_adversarial.py`）会**自动**把新增的无必选参 `--json` 命令纳入覆盖——新命令在全新数据目录上无参调用必须 exit 0。
-- 凭据永不落盘、永不明文回显（本计划引擎面无密钥，但不得引入任何凭据回显路径）。
+- 凭据永不落盘、永不明文回显（本计划引擎面无密钥，但不得引入任何凭据回显路径）；交换内容在**持久化边界**经 `redact_text` 脱敏后才入 `completions` 表（Codex 三声部信任折叠：展示期脱敏无法追回已落盘内容），QA 以真实形状密钥样本断言库内无泄漏。
 - 服务状态字面量 = 规格 §10.2 五态的英文本位设计：`stopped` / `starting` / `loading` / `running` / `failed`，由 `003_instances.sql` 的 CHECK 约束钉死；下载态字面量本计划不涉及（P2）。
 - 端口候选扫描上限约 20（规格 §15"网关端口最多约 20 候选"同理适用）；本地推理超时默认 600 秒（规格 §15"本地 600 秒"）。
 - 多进程日志（TODO-004 / ADR-006 修订）：引擎子进程 stdout/stderr 重定向到按进程命名的日志文件 `logs/engine-llama-cpp.log`，**不**经 `RotatingFileHandler`。
@@ -132,8 +134,9 @@ README.md / CHANGELOG.md / TODOS.md  # 修改（Task 8）
   - `ModelFile(name: str, path: Path, size_bytes: int, format: str, parts: int)` — frozen dataclass。
   - `model_scan_roots(model_dirs: list[str], data_dir: Path) -> list[Path]`
   - `scan_model_files(roots: list[Path]) -> tuple[list[ModelFile], int, bool]` — (模型, 跳过数, 是否截断)。
+  - `shard_family_complete(path: Path) -> bool` — 记录文件的分片族（若有）在盘上完整；server 启动前复核 insert-only 目录的陈旧行（Codex 陈旧行折叠）。
   - `looks_like_gguf(path: Path) -> bool`
-  - `MAX_SCAN_DEPTH = 4`、`MAX_SCAN_ENTRIES = 500`（模块常量）。
+  - `MAX_SCAN_DEPTH = 4`、`MAX_SCAN_ENTRIES = 500`、`MAX_SCAN_VISITED = 20000`（模块常量；访问预算计入全部遍历条目，非仅 GGUF 候选——Codex 预算折叠）。
   - `upsert_models(conn: sqlite3.Connection, files: list[ModelFile]) -> None`
   - `list_models(conn: sqlite3.Connection) -> list[dict]`
   - `find_model(conn: sqlite3.Connection, ident: str) -> list[dict]` — 精确名 → 精确路径 → 路径后缀匹配，**返回全部候选**（0/1/多由调用方裁决）。
@@ -236,7 +239,34 @@ def test_missing_roots_are_silent(tmp_path):
 
 def test_model_scan_roots_dedupes_and_appends_default(tmp_path):
     roots = model_scan_roots(["~/m", "~/m"], tmp_path)
-    assert roots == [Path("~/m").expanduser(), tmp_path / "models"]
+    assert roots == [Path("~/m").expanduser().resolve(), (tmp_path / "models").resolve()]
+
+def test_scan_roots_resolve_relative_dirs_across_cwd(tmp_path, monkeypatch):
+    root = tmp_path / "relmodels"
+    root.mkdir()
+    _write_gguf(root / "m.gguf", size=10)
+    monkeypatch.chdir(tmp_path)
+    files, _skipped, _truncated = scan_model_files(model_scan_roots(["relmodels"], tmp_path))
+    assert files and files[0].path.is_absolute()  # Codex path-stability fold
+
+def test_non_contiguous_shard_set_is_rejected(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    _write_gguf(root / "x-00001-of-00002.gguf", size=10)
+    _write_gguf(root / "x-00003-of-00002.gguf", size=10)
+    files, skipped, _truncated = scan_model_files([root])
+    assert files == [] and skipped == 2  # Codex contiguity fold
+
+def test_visit_budget_bounds_non_gguf_directories(tmp_path, monkeypatch):
+    import ipostudio.catalog.scan as scan_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    for index in range(50):
+        (root / f"note-{index:03d}.txt").write_bytes(b"x")
+    monkeypatch.setattr(scan_module, "MAX_SCAN_VISITED", 10)
+    files, _skipped, truncated = scan_model_files([root])
+    assert files == [] and truncated is True  # Codex budget fold
 
 def test_looks_like_gguf_tolerates_unreadable_file(tmp_path):
     assert looks_like_gguf(tmp_path / "absent.gguf") is False
@@ -314,6 +344,27 @@ GGUF_SUFFIX = ".gguf"
 _SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 MAX_SCAN_DEPTH = 4
 MAX_SCAN_ENTRIES = 500
+MAX_SCAN_VISITED = 20000  # every visited entry counts, not only GGUF candidates
+
+def shard_family_complete(path: Path) -> bool:
+    \"\"\"True when `path`'s shard family (if any) is fully present on disk.
+    The catalog is insert-only until P2 pruning, so the server path
+    re-validates the recorded file set before launch (Codex stale-row
+    fold).\"\"\"
+    match = _SHARD.search(path.name)
+    if match is None:
+        return path.exists()
+    total = int(match.group(2))
+    base = path.name[: match.start()]
+    indexes: set[int] = set()
+    try:
+        for entry in os.scandir(path.parent):
+            found = _SHARD.search(entry.name)
+            if found is not None and entry.name[: found.start()] == base:
+                indexes.add(int(found.group(1)))
+    except OSError:
+        return False
+    return indexes == set(range(1, total + 1))
 
 @dataclass(frozen=True)
 class ModelFile:
@@ -326,10 +377,12 @@ class ModelFile:
 def model_scan_roots(model_dirs: list[str], data_dir: Path) -> list[Path]:
     """Configured dirs plus the default <data>/models root, deduplicated
     (architecture.md data layout: the data-dir models/ folder is always a
-    scan root; MODEL_DIRS adds more)."""
+    scan root; MODEL_DIRS adds more).  Identities are persisted absolute
+    (`resolve()`), so scanning from directory A and starting from directory
+    B address the same rows (Codex path-stability fold)."""
     roots: list[Path] = []
     for raw in [*model_dirs, str(data_dir / "models")]:
-        path = Path(raw).expanduser()
+        path = Path(raw).expanduser().resolve()
         if path not in roots:
             roots.append(path)
     return roots
@@ -341,11 +394,14 @@ def looks_like_gguf(path: Path) -> bool:
     except OSError:
         return False
 
-def _iter_files(root: Path, unreadable: list):
+def _iter_files(root: Path, unreadable: list, visited: list):
     """Bounded recursive walk: depth <= MAX_SCAN_DEPTH; hidden entries and
     symlinked directories are never descended.  os.scandir with
     follow_symlinks=False keeps this 3.11-compatible (pathlib's
     follow_symlinks kwarg on is_dir/is_file is 3.12+) and R1-clean.
+    Entries are streamed (never materialized: a mis-pointed directory with
+    a million non-GGUF files must not exhaust memory — Codex budget fold)
+    and EVERY visited entry counts toward the shared `visited[0]` budget.
     Unreadable directories are appended to `unreadable` so the skip count
     stays honest (spec §13/§12.3: silence must be counted, never free)."""
     def walk(directory: Path, depth: int):
@@ -353,16 +409,20 @@ def _iter_files(root: Path, unreadable: list):
             unreadable.append(directory)  # ENG F8: depth refusal is accounted
             return
         try:
-            entries = list(os.scandir(directory))
+            scanner = os.scandir(directory)
         except OSError:
             unreadable.append(directory)
             return
-        for entry in entries:
-            yield entry
-            if entry.name.startswith("."):
-                continue  # never descend into hidden directories
-            if entry.is_dir(follow_symlinks=False):
-                yield from walk(Path(entry.path), depth + 1)
+        with scanner:
+            for entry in scanner:
+                if visited[0] >= MAX_SCAN_VISITED:
+                    return
+                visited[0] += 1
+                yield entry
+                if entry.name.startswith("."):
+                    continue  # never descend into hidden directories
+                if entry.is_dir(follow_symlinks=False):
+                    yield from walk(Path(entry.path), depth + 1)
 
     yield from walk(root, 0)
 
@@ -370,12 +430,13 @@ def _collect_candidates(roots: list[Path]) -> tuple[list[Path], bool, int]:
     candidates: list[Path] = []
     truncated = False
     unreadable: list = []
+    visited = [0]  # shared across roots: the budget is global, not per-root
     for root in roots:
         if not root.is_dir():
             if root.exists():
                 unreadable.append(root)  # ENG F8: configured root is a file
             continue
-        for entry in _iter_files(root, unreadable):
+        for entry in _iter_files(root, unreadable, visited):
             if not entry.name.endswith(GGUF_SUFFIX) or entry.name.startswith("."):
                 continue
             if not entry.is_file(follow_symlinks=False):
@@ -383,7 +444,7 @@ def _collect_candidates(roots: list[Path]) -> tuple[list[Path], bool, int]:
             if len(candidates) >= MAX_SCAN_ENTRIES:
                 return candidates, True, len(unreadable)
             candidates.append(Path(entry.path))
-    return candidates, truncated, len(unreadable)
+    return candidates, truncated or visited[0] >= MAX_SCAN_VISITED, len(unreadable)
 
 def _file_size(path: Path) -> int | None:
     try:
@@ -426,8 +487,17 @@ def scan_model_files(roots: list[Path]) -> tuple[list[ModelFile], int, bool]:
             and candidate.name[: m2.start()] == base
         ]
         handled.update(shards)
-        if index != "00001" or len(shards) != int(total):
-            skipped += 1  # orphan shard or incomplete set
+        # equal count is not completeness: {1, 3}-of-00002 must not pass
+        # (Codex contiguity fold)
+        indexes = sorted(
+            int(_SHARD.search(shard.name).group(1)) for shard in shards
+        )
+        if (
+            index != "00001"
+            or len(shards) != int(total)
+            or indexes != list(range(1, int(total) + 1))
+        ):
+            skipped += 1  # orphan shard, incomplete, or non-contiguous set
             continue
         sizes = [_file_size(shard) for shard in shards]
         if any(size is None for size in sizes) or not all(
@@ -563,6 +633,7 @@ GGUF = b"GGUF" + b"\x00" * 28
 def catalog(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     root = tmp_path / "models"
+    root.mkdir()  # Codex determinism fold: write_bytes never creates parents
     (root / "tiny-q4.gguf").write_bytes(GGUF + b"\x00" * 36)
     (root / "other-f16.gguf").write_bytes(GGUF + b"\x00" * 36)
     return tmp_path, root
@@ -774,6 +845,14 @@ def open_config_and_db() -> tuple[sqlite3.Connection, AppConfig]:
         sys.exit(1)
     return conn, cfg
 
+def open_db_only() -> sqlite3.Connection:
+    """Migrated database without loading settings.toml (Codex recovery fold):
+    stop/status/list/info must work even when the config file is broken —
+    a user must always be able to stop what they started."""
+    conn = open_db(resolve_db_path())
+    migrate(conn)
+    return conn
+
 def _fail(message: str) -> None:
     click.echo(f"error: {message}", err=True)
     sys.exit(1)
@@ -789,14 +868,16 @@ model dropped into a directory is selectable without running `ipo models`
 first (ruling #12)."""
 
 import json
+import os
 import sqlite3
+from pathlib import Path
 
 import click
 
 from ipostudio.catalog.repo import find_model, list_models, upsert_models
 from ipostudio.catalog.scan import MAX_SCAN_ENTRIES, model_scan_roots, scan_model_files
 from ipostudio.cli.base import _fail, open_config_and_db
-from ipostudio.conf.loader import ConfigStore
+from ipostudio.conf.loader import ConfigError, ConfigStore
 from ipostudio.conf.paths import resolve_config_path, resolve_data_dir
 
 def _refresh(conn: sqlite3.Connection, cfg) -> tuple[list[dict], int, bool, list]:
@@ -825,6 +906,9 @@ def models(as_json: bool) -> None:
     active = cfg.general.local_chat_model
     for row in rows:
         row["active"] = row["name"] == active
+        # insert-only catalog until P2 pruning: surface ghost rows instead of
+        # hiding them (Codex stale-row fold; TODO-021 owns removal)
+        row["missing"] = not Path(row["path"]).exists()
     if as_json:
         click.echo(
             json.dumps(
@@ -852,9 +936,10 @@ def models(as_json: bool) -> None:
     click.echo(f"{'NAME':<{width}}  SIZE  PARTS  FORMAT  PATH")
     for row in rows:
         mark = "*" if row["active"] else " "
+        path_text = row["path"] + ("  (missing)" if row["missing"] else "")
         click.echo(
             f"{mark + row['name']:<{width}}  {_human_size(row['size_bytes']):>8}  "
-            f"{row['parts']:>5}  {row['format']:<6}  {row['path']}"
+            f"{row['parts']:>5}  {row['format']:<6}  {path_text}"
         )
     if truncated:
         click.echo(
@@ -883,9 +968,13 @@ def activate_model(conn: sqlite3.Connection, ident: str, cfg) -> str:
     # name — if the bare name still matches several rows, `server start`
     # would brick.  Path-addressable activation lands with P2 pruning.
     if len(find_model(conn, name)) > 1:
+        # the ident itself was unique — the NAME is not; say so precisely so
+        # the user is not sent in a circle (Codex DX dead-loop fold)
         raise ValueError(
-            f"model name {name!r} is ambiguous across directories; activate "
-            f"by a name unique in the catalog (P2 adds path-addressable selection)"
+            f"several catalog rows share the name {name!r} (same file name in "
+            f"different directories); until catalog pruning lands (P2), "
+            f"activate by a name unique in the catalog — or remove the "
+            f"duplicate file and re-run `ipo models`"
         )
     store = ConfigStore(resolve_config_path(), cfg)
     store.set("local_chat_model", name)
@@ -914,13 +1003,26 @@ def model(select_name: str | None, as_json: bool) -> None:
     try:
         _refresh(conn, cfg)
         name = activate_model(conn, select_name, cfg)
-    except LookupError as exc:
-        _fail(str(exc))
-    except ValueError as exc:
-        _fail(str(exc))
+    except (LookupError, ValueError, ConfigError) as exc:
+        _fail(str(exc))  # Codex boundary fold: lock/permission failures are
+        # ConfigError, not LookupError — without this arm they traceback
     finally:
         conn.close()
+    if as_json:  # Codex JSON-contract fold: selection is machine-readable too
+        click.echo(json.dumps(
+            {"selected": name, "saved": True,
+             "apply_with": "ipo server restart"},
+            ensure_ascii=False,
+        ))
+        return
     click.echo(f"active chat model: {name} (saved)")
+    override = os.environ.get("IPO_LOCAL_CHAT_MODEL", "").strip()
+    if override and override != name:
+        click.echo(
+            f"warning: IPO_LOCAL_CHAT_MODEL={override!r} is set in this shell; "
+            f"it overrides the saved value for new commands",
+            err=True,
+        )
     click.echo("if a server is running, apply the change with `ipo server restart`")
 
 @click.command("model-info")
@@ -967,6 +1069,41 @@ cli.add_command(model)
 cli.add_command(model_info)
 ```
 
+3. `collect_command_docs` 升级（Codex DX 折叠：现有收集器把 `click.Argument` 当选项输出 `flag:""`，且不递归命令组——`server start --model`、`config set` 等子命令面在 guide/help 中缺失；注意 Argument 的 `.help` 恒为 `None`，现有 `option.help or ""` 并不崩溃，缺口是**完整性**而非崩溃）：
+
+```python
+def collect_command_docs() -> list[dict]:
+    def doc_for(command: click.Command) -> dict:
+        options: list[dict] = []
+        arguments: list[dict] = []
+        for param in command.params:
+            if isinstance(param, click.Argument):
+                arguments.append(
+                    {"name": (param.name or "").upper(),
+                     "required": param.required}
+                )
+            else:
+                options.append(
+                    {"flag": param.opts[0] if param.opts else "",
+                     "help": param.help or ""}
+                )
+        doc: dict = {
+            "name": command.name,
+            "help": command.help or "",
+            "options": options,
+            "arguments": arguments,
+        }
+        if isinstance(command, click.Group):
+            doc["commands"] = [
+                doc_for(sub) for _, sub in sorted(command.commands.items())
+            ]
+        return doc
+
+    return [doc_for(command) for _, command in sorted(cli.commands.items())]
+```
+
+`_render_docs` 同步：markdown/text 分支输出 `arguments`（`<NAME>` 形态）与嵌套 `commands`（二级条目/缩进行）；`json` 分支自然携带新键。执行时更新 `tests/cli/test_main.py` 的 guide 断言（新增 server/config 子命令行与 `model-info`/`chat` 的 `<NAME>` 参数行），walker `--json` 洁净守卫保持绿。
+
 `tests/qa/test_cli_ux_adversarial.py` 的修改：
 
 1. `test_main_py_never_styles_directly` 改为包级守卫（函数名同步改为 `test_cli_package_never_styles_directly`；文件顶部若无 `from pathlib import Path` 则补上）：
@@ -979,6 +1116,9 @@ def test_cli_package_never_styles_directly():
     cli_dir = Path(inspect.getsourcefile(cli_main)).parent
     offenders = []
     for py in sorted(cli_dir.glob("*.py")):
+        if py.name == "ui.py":
+            continue  # the sanctioned styling boundary itself (Codex fold:
+            # the guard as written flagged its own exempt module)
         source = py.read_text(encoding="utf-8")
         if "click.style" in source or "click.secho" in source:
             offenders.append(py.name)
@@ -1018,7 +1158,9 @@ git commit -m "feat: add ipo models, model --select and model-info commands"
 - Create: `src/ipostudio/engines/discovery.py`
 - Create: `src/ipostudio/engines/llama_server.py`
 - Modify: `src/ipostudio/conf/schema.py`（engines 族新增 `llama_cpp_path`）
+- Modify: `src/ipostudio/conf/loader.py`（save() 盖 `config_version` 版本戳，防降级拒绝——Codex DX 折叠）
 - Create: `tests/engines/__init__.py`（空文件）
+- Modify: `tests/conf/test_loader.py`（save 版本戳测试）
 - Create: `tests/engines/fake_llama_server.py`
 - Modify: `tests/conf/test_schema.py`（SPEC_DEFAULTS 加一行）
 - Modify: `tests/qa/test_conf_adversarial.py`（ROUNDTRIP_VALUES + 行数 60→61）
@@ -1030,7 +1172,7 @@ git commit -m "feat: add ipo models, model --select and model-info commands"
   - `discovery.ENGINE_COMMAND = "llama-server"`
   - `resolve_engine(configured: str) -> tuple[Path | None, str | None]` — (路径, 问题)；路径非空 ⇒ 问题为 None。
   - `build_server_argv(engine: Path, model_path: Path, host: str, port: int, tuning: ServerTuning, extra_args: list[str]) -> list[str]`
-  - `tests/engines/fake_llama_server.py`：必认 `--host/--port/--model`（`parse_known_args` 忽略多余旗标），另支持 `--load-delay SECONDS`（期间 /health 回 503）与 `--exit-immediately`（stderr 一行后 exit 1）。
+  - `tests/engines/fake_llama_server.py`：必认 `--host/--port/--model`（`parse_known_args` 忽略多余旗标），另支持 `--load-delay SECONDS`（期间 /health 回 503）与 `--exit-immediately`（stderr 一行后 exit 1）；GET `/props` 回 `{"model_path": <--model 值>}`（stop 身份守卫的替身面——Codex 折叠）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1164,6 +1306,32 @@ def test_fake_engine_double_speaks_health_and_chat(tmp_path):
 
 `tests/qa/test_conf_adversarial.py`：`ROUNDTRIP_VALUES` 的 engines 段补 `"llama_cpp_path": "engines/llama-server"`（置于 `llama_cpp_extra_args` 之前），并把 `assert len(FLAT_KEYS) == 60` 改为 `== 61`（docstring 里的 "60 - 3 credentials = 57" 同步改 "61 - 3 = 58"）。
 
+`src/ipostudio/conf/loader.py` 的 `save()`：在 `for family, key in self._dirty:` 合并循环之后、`fd, temp_name = _mkstemp_in(self.path.parent)` 之前插入（Codex DX 降级折叠——save 不盖版本戳时，旧版本读不到 `config_version` 会按当前旧值解释，把本工具自己写出的新键判为未知键并**拒绝加载**，用户回退即坏档；盖戳后旧版本按设计走"更高版本容忍+警告丢弃"路径）：
+
+```python
+                # Stamp the writing schema version: after a downgrade the
+                # older build reads a HIGHER file version and drops
+                # unknown keys with a warning, instead of rejecting a
+                # config this build itself wrote.
+                merged["config_version"] = _SCHEMA_CONFIG_VERSION
+```
+
+`tests/conf/test_loader.py` 追加：
+
+```python
+def test_save_stamps_config_version_for_downgrade_tolerance(tmp_path):
+    import tomllib
+
+    from ipostudio.conf.loader import ConfigStore
+    from ipostudio.conf.paths import resolve_config_path
+
+    store = ConfigStore(resolve_config_path(), load_config())
+    store.set("general.server_port", 18765)
+    store.save()
+    raw = tomllib.loads(resolve_config_path().read_text(encoding="utf-8"))
+    assert raw["config_version"] == _SCHEMA_CONFIG_VERSION  # Codex fold
+```
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/engines/test_llama_server.py tests/conf/test_schema.py tests/qa/test_conf_adversarial.py -v`
@@ -1259,6 +1427,18 @@ def build_server_argv(
         argv += ["--n-gpu-layers", "0"]  # explicit CPU pinning
     if tuning.server_flash_attn in ("on", "off"):
         argv += ["--flash-attn", tuning.server_flash_attn]
+    # Managed flags must not be overridable via extras: the engine honors
+    # the last occurrence, so an extra --port/--host/--model would desync
+    # the recorded instance row from reality (Codex ENG fold)
+    managed = {"--model", "-m", "--host", "--port"}
+    for arg in extra_args:
+        flag = str(arg).split("=", 1)[0]
+        if flag in managed:
+            raise ValueError(
+                f"llama_cpp_extra_args contains managed flag {flag!r}; manage "
+                f"it via its config key (server_host / server_port / model "
+                f"selection) instead"
+            )
     argv += [str(arg) for arg in extra_args]
     return argv
 ```
@@ -1291,7 +1471,12 @@ def main() -> None:
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if self.path == "/health":
+            if self.path == "/props":
+                # stop-identity guard surface: names the served model so
+                # `ipo server stop` can prove port ownership (Codex fold);
+                # llama-server documents /props with the model path
+                self._send(200, {"model_path": args.model})
+            elif self.path == "/health":
                 if time.monotonic() < ready_at:
                     self._send(503, {"error": {"message": "Loading model"}})
                 else:
@@ -1374,7 +1559,8 @@ git commit -m "feat: locate llama-server and translate config into engine argv"
   - `probe_health(host: str, port: int, timeout_s: float) -> str` → `"ok" | "loading" | "down"`
   - `choose_port(host: str, base_port: int, candidates: int = 20) -> int | None`
   - `start_instance(conn, argv: list[str], *, engine: str, model_name: str, model_path: str, host: str, port: int, log_path: Path, timeout_s: float, poll_interval: float = 0.5, probe=probe_health, spawn=subprocess.Popen) -> StartOutcome`；`StartOutcome(instance: dict, ok: bool)`（dataclass）。
-  - `stop_instance(conn, *, grace_s: float = 10.0, poll_interval: float = 0.25, probe=probe_health) -> dict | None`
+  - `probe_identity(host: str, port: int, model_path: str, timeout_s: float) -> str` → `"owned" | "foreign" | "absent"`（stop 身份守卫，Codex 折叠）。
+  - `stop_instance(conn, *, grace_s: float = 10.0, poll_interval: float = 0.25, probe=probe_health, identify=probe_identity) -> dict | None`（身份证明才发信号；foreign 拒绝并如实留行；absent 不发信号；状态写为条件更新——Codex 折叠）
   - `repo.py`：`active_instance(conn) -> dict | None`、`recent_instances(conn, limit: int = 20) -> list[dict]`、`record_completion(conn, *, instance_id: int, model_name: str, prompt_chars: int, output_chars: int, duration_ms: int, status: str, detail: str = "") -> None`、`last_completion(conn) -> dict | None`；`SERVICE_STATES` 从 supervisor 导入再导出（单一事实源）。
 
 **依赖方向（锁定）**：行读写与 `SERVICE_STATES` 定义在 `supervisor.py`（自带 `_get`/`_touch` 私有读写与 stop 的内联查询）；`repo.py` 导入 supervisor 的 `SERVICE_STATES` 并提供查询/插入面；**supervisor 不 import repo**（避免环）。
@@ -1425,6 +1611,9 @@ class _FakeProc:
     def terminate(self):
         self.terminated = True
         self.returncode = 0
+
+    def wait(self, timeout=None):
+        return self.returncode
 
 def _spawned_kwargs(tmp_path, proc, probe):
     return dict(
@@ -1505,12 +1694,14 @@ def test_start_instance_engine_exit_marks_failed_with_log_tail(tmp_path):
 
 def test_start_instance_timeout_marks_failed(tmp_path):
     conn = _db(tmp_path)
+    proc = _FakeProc()
     outcome = start_instance(
         conn, ["engine"],
-        **_spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "loading")
+        **_spawned_kwargs(tmp_path, proc, lambda *a: "loading")
     )
     assert outcome.ok is False
-    assert "did not report ready" in outcome.instance["detail"]
+    assert "was terminated" in outcome.instance["detail"]
+    assert proc.terminated is True  # Codex orphan fold: no unmanaged engine
     conn.close()
 
 def test_start_instance_spawn_failure_marks_failed(tmp_path):
@@ -1560,16 +1751,64 @@ def test_stop_instance_without_active_returns_none(tmp_path):
     assert stop_instance(conn) is None
     conn.close()
 
-def test_stop_instance_skips_kill_when_port_silent(tmp_path, monkeypatch):
+def test_stop_sends_no_signal_when_identity_absent(tmp_path, monkeypatch):
     conn = _db(tmp_path)
-    outcome = start_instance(
+    start_instance(
         conn, ["engine"], **_spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "ok")
     )
     kills = []
     monkeypatch.setattr(supervisor.os, "kill", lambda pid, sig: kills.append((pid, sig)))
-    stopped = stop_instance(conn, probe=lambda *a: "down")
+    stopped = stop_instance(conn, identify=lambda *a, **k: "absent")
     assert stopped["state"] == "stopped"
-    assert kills == []
+    assert kills == []  # Codex fold: no blind kill on an unproven identity
+    assert "no stop signal was sent" in stopped["detail"]
+    conn.close()
+
+def test_stop_refuses_signal_when_identity_foreign(tmp_path, monkeypatch):
+    conn = _db(tmp_path)
+    start_instance(
+        conn, ["engine"], **_spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "ok")
+    )
+    kills = []
+    monkeypatch.setattr(supervisor.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    stopped = stop_instance(conn, identify=lambda *a, **k: "foreign")
+    assert kills == []  # a foreign document on the port must never be killed
+    assert stopped["state"] == "running"  # refusal leaves the row honest
+    assert "different model document" in stopped["detail"]
+    conn.close()
+
+def test_stop_signals_once_identity_confirms(tmp_path, monkeypatch):
+    conn = _db(tmp_path)
+    start_instance(
+        conn, ["engine"], **_spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "ok")
+    )
+    kills = []
+    monkeypatch.setattr(supervisor.os, "kill", lambda pid, sig: kills.append(sig))
+    stopped = stop_instance(conn, identify=lambda *a, **k: "owned")
+    assert stopped["state"] == "stopped"
+    assert kills == [signal.SIGTERM]
+    conn.close()
+
+def test_concurrent_stop_cancels_start(tmp_path, monkeypatch):
+    conn = _db(tmp_path)
+    kills = []
+    monkeypatch.setattr(supervisor.os, "kill", lambda pid, sig: kills.append(sig))
+    proc = _FakeProc()
+    raced = {"done": False}
+
+    def racing_probe(*a):
+        if not raced["done"]:
+            raced["done"] = True
+            stop_instance(conn, identify=lambda *a, **k: "absent")
+        return "loading"
+
+    outcome = start_instance(
+        conn, ["engine"], **_spawned_kwargs(tmp_path, proc, racing_probe)
+    )
+    assert outcome.ok is False
+    assert proc.terminated is True  # the loser of the race cleans up
+    row = get_instance(conn, outcome.instance["id"])
+    assert row["state"] == "stopped"  # and never resurrects the row
     conn.close()
 
 def test_stop_instance_escalates_to_kill_after_grace(tmp_path, monkeypatch):
@@ -1587,7 +1826,10 @@ def test_stop_instance_escalates_to_kill_after_grace(tmp_path, monkeypatch):
     def always_up(*args):
         return "ok" if len(kills) < 2 else "down"
 
-    stop_instance(conn, grace_s=0.05, poll_interval=0.01, probe=always_up)
+    stop_instance(
+        conn, grace_s=0.05, poll_interval=0.01,
+        probe=always_up, identify=lambda *a, **k: "owned",
+    )
     assert len(kills) == 2  # SIGTERM then the SIGKILL-equivalent escalation
     conn.close()
 
@@ -1600,7 +1842,11 @@ def test_active_instance_prefers_latest(tmp_path):
         conn, ["engine"], **_spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "ok")
     ).instance
     assert active_instance(conn)["id"] == second["id"]
-    stop_instance(conn)
+    stop_instance(conn, identify=lambda *a, **k: "owned")
+    # stop is latest-first: the older row must still be active here
+    # (Codex determinism fold: the old assertion expected None wrongly)
+    assert active_instance(conn)["id"] == first["id"]
+    stop_instance(conn, identify=lambda *a, **k: "owned")
     assert active_instance(conn) is None
     assert [row["id"] for row in recent_instances(conn)] == [second["id"], first["id"]]
     conn.close()
@@ -1716,8 +1962,8 @@ SERVICE_STATES = ("stopped", "starting", "loading", "running", "failed")
 ENGINE_LOG_FILE = "engine-llama-cpp.log"  # TODO-004 convention: per-process file
 
 _INSTANCE_COLUMNS = (
-    "id, engine, model_name, model_path, host, port, pid, state, detail, "
-    "started_at, stopped_at, created_at, updated_at"
+    "id, engine, engine_version, model_name, model_path, host, port, pid, "
+    "state, detail, started_at, stopped_at, created_at, updated_at"
 )
 
 @dataclass
@@ -1754,9 +2000,13 @@ def probe_health(host: str, port: int, timeout_s: float) -> str:
 def choose_port(host: str, base_port: int, candidates: int = 20) -> int | None:
     """First bindable port at/after base_port (§5.3: an occupied configured
     port is replaced by a free one whose actual address is displayed; §15
-    caps candidate scans at about 20).  IPv4 scope for M0'."""
-    for port in range(base_port, base_port + candidates):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    caps candidate scans at about 20).  The socket family follows the host
+    literal so an IPv6 loopback configuration probes IPv6 binds (Codex
+    address-family fold); the range is capped at 65536 so a configured port
+    of 65535 cannot raise OverflowError on bind (Codex boundary fold)."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    for port in range(max(base_port, 1), min(base_port + candidates, 65536)):
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
             try:
                 sock.bind((host, port))
             except OSError:
@@ -1770,13 +2020,29 @@ def _get(conn: sqlite3.Connection, instance_id: int) -> dict:
     ).fetchone()
     return dict(row)
 
-def _touch(conn: sqlite3.Connection, instance_id: int, **fields) -> None:
+def _touch(
+    conn: sqlite3.Connection, instance_id: int, *, expect=None, **fields
+) -> bool:
+    """Conditional row update.  `expect` restricts the write to rows still
+    in one of the given states (Codex race fold): a concurrent `stop` can
+    retire a `starting` row and the still-running startup then loses every
+    subsequent transition instead of resurrecting the row."""
     assignments = ", ".join(f"{name} = ?" for name in fields)
     values = [*fields.values(), _now(), instance_id]
-    conn.execute(
-        f"UPDATE instances SET {assignments}, updated_at = ? WHERE id = ?", values
-    )
+    if expect is None:
+        cur = conn.execute(
+            f"UPDATE instances SET {assignments}, updated_at = ? WHERE id = ?",
+            values,
+        )
+    else:
+        states = ", ".join("?" for _ in expect)
+        cur = conn.execute(
+            f"UPDATE instances SET {assignments}, updated_at = ? "
+            f"WHERE id = ? AND state IN ({states})",
+            [*values, *expect],
+        )
     conn.commit()
+    return cur.rowcount > 0
 
 def _tail(path: Path, lines: int = 15) -> str:
     try:
@@ -1786,8 +2052,10 @@ def _tail(path: Path, lines: int = 15) -> str:
     picked = content.splitlines()[-lines:]
     return redact_text(" | ".join(picked))[:1500]
 
-def _fail_row(conn: sqlite3.Connection, instance_id: int, detail: str) -> None:
-    _touch(conn, instance_id, state="failed", detail=detail[:2000])
+def _fail_row(
+    conn: sqlite3.Connection, instance_id: int, detail: str, *, expect=None
+) -> None:
+    _touch(conn, instance_id, state="failed", detail=detail[:2000], expect=expect)
 
 def _engine_version(engine: str) -> str:
     """Best-effort `--version` probe: the instance row records WHICH engine
@@ -1861,26 +2129,69 @@ def start_instance(
                     return outcome(False)
                 health = probe(host, port, 1.5)
                 if health == "ok":
-                    _touch(conn, instance_id, state="running", detail="",
-                           started_at=_now())
+                    # expect=: a concurrent stop must win the race (Codex
+                    # fold) — if it retired the row, do not resurrect it
+                    if not _touch(conn, instance_id, state="running",
+                                  detail="", started_at=_now(),
+                                  expect=("starting", "loading")):
+                        proc.terminate()
+                        return outcome(False)
                     return outcome(True)
                 if health == "loading" and observed != "loading":
                     observed = "loading"
-                    _touch(conn, instance_id, state="loading")
+                    if not _touch(conn, instance_id, state="loading",
+                                  expect=("starting",)):
+                        proc.terminate()
+                        return outcome(False)
                 time.sleep(poll_interval)
         except KeyboardInterrupt:
             proc.terminate()
-            _fail_row(conn, instance_id, "startup wait interrupted (Ctrl+C)")
+            _fail_row(conn, instance_id, "startup wait interrupted (Ctrl+C)",
+                      expect=("starting", "loading"))
             return outcome(False)
+        # Codex orphan fold: a timed-out engine must never outlive a failed
+        # start unmanaged — the old flow marked the row failed and left the
+        # process running, and `ipo server stop` (active states only) could
+        # never reach it
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _signal(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         _fail_row(
             conn, instance_id,
-            f"health check did not report ready within {timeout_s:g}s; the engine "
-            f"may still be loading — inspect `ipo server logs` or stop it with "
-            f"`ipo server stop`",
+            f"health check did not report ready within {timeout_s:g}s; the "
+            f"engine process was terminated — inspect `ipo server logs`, then "
+            f"start again (raise --timeout if the model needs longer to load)",
+            expect=("starting", "loading"),
         )
         return outcome(False)
     finally:
         log_handle.close()
+
+def probe_identity(
+    host: str, port: int, model_path: str, timeout_s: float
+) -> str:
+    """'owned' | 'foreign' | 'absent' (Codex stop fold).  A health status
+    alone cannot prove PID ownership — any 200/503 on the port would
+    authorize a kill.  llama-server documents GET /props with the served
+    model, so the guard requires the recorded model path to appear in that
+    document before any signal is sent.  Residual risk (the recorded PID
+    recycled while the port still serves this model) stays with TODO-016."""
+    import urllib.error
+    import urllib.request
+
+    host_part = f"[{host}]" if ":" in host else host
+    try:
+        with urllib.request.urlopen(
+            f"http://{host_part}:{port}/props", timeout=timeout_s
+        ) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError:
+        return "absent"
+    except OSError:
+        return "absent"
+    return "owned" if model_path in body else "foreign"
 
 def stop_instance(
     conn: sqlite3.Connection,
@@ -1888,13 +2199,16 @@ def stop_instance(
     grace_s: float = 10.0,
     poll_interval: float = 0.25,
     probe=probe_health,
+    identify=probe_identity,
 ) -> dict | None:
-    """Stop the most recent active instance.  Ownership guard: the kill is
-    only issued while the recorded port still answers with a health document
-    (PID reuse and port takeover make a blind kill dangerous; process-identity
-    hardening is P3 scope).  os.kill is the cross-platform API: POSIX sends
-    SIGTERM, Windows maps it to TerminateProcess (no graceful shutdown there
-    — documented platform difference, ADR-010 backlog)."""
+    """Stop the most recent active instance.  Kill guard (Codex fold): a
+    signal is only issued while the recorded port answers /props naming the
+    recorded model; a foreign document refuses the stop with manual
+    guidance; a silent port sends no signal at all (a blind kill could hit a
+    recycled PID).  State writes are conditional on the row still being
+    active, so a concurrent start cannot resurrect a stopped row.
+    os.kill is the cross-platform API: POSIX sends SIGTERM, Windows maps it
+    to TerminateProcess (no graceful shutdown there — ADR-010 backlog)."""
     row = conn.execute(
         f"SELECT {_INSTANCE_COLUMNS} FROM instances "
         "WHERE state IN ('starting','loading','running') ORDER BY id DESC LIMIT 1"
@@ -1903,28 +2217,46 @@ def stop_instance(
         return None
     instance = dict(row)
     pid = instance["pid"]
-    if pid is not None and probe(instance["host"], instance["port"], 2.0) != "down":
-        _signal(pid, signal.SIGTERM)
-        deadline = time.monotonic() + grace_s
-        while time.monotonic() < deadline:
-            if probe(instance["host"], instance["port"], 1.0) == "down":
-                break
-            time.sleep(poll_interval)
-        else:
-            _signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    conn.execute(
-        "UPDATE instances SET state = 'stopped', stopped_at = ?, updated_at = ? "
-        "WHERE id = ?",
-        (_now(), _now(), instance["id"]),
+    detail = instance["detail"]
+    if pid is not None:
+        identity = identify(instance["host"], instance["port"],
+                            instance["model_path"], 2.0)
+        if identity == "owned":
+            _signal(pid, signal.SIGTERM)
+            deadline = time.monotonic() + grace_s
+            while time.monotonic() < deadline:
+                if identify(instance["host"], instance["port"],
+                            instance["model_path"], 1.0) == "absent":
+                    break
+                time.sleep(poll_interval)
+            else:
+                _signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        elif identity == "foreign":
+            _touch(
+                conn, instance["id"],
+                detail=(detail + "; " if detail else "") + (
+                    "port answers with a different model document — verify "
+                    f"PID {pid} manually before any manual termination"
+                ),
+                expect=("starting", "loading", "running"),
+            )
+            return _get(conn, instance["id"])
+        else:  # absent: nothing serves the recorded port
+            detail = (detail + "; " if detail else "") + (
+                "port not answering; no stop signal was sent (identity "
+                f"unprovable) — if a process remains, check PID {pid} manually"
+            )
+    _touch(
+        conn, instance["id"], state="stopped", stopped_at=_now(),
+        detail=detail, expect=("starting", "loading", "running"),
     )
-    conn.commit()
     return _get(conn, instance["id"])
 
 def _signal(pid: int, sig: int) -> None:
     try:
         os.kill(pid, sig)
     except OSError:
-        pass  # already gone — the final state write is what matters
+        pass  # already gone — the conditional state write is what matters
 ```
 
 `src/ipostudio/engines/repo.py` 全文：
@@ -1939,6 +2271,7 @@ imported by the supervisor (no cycle)."""
 import sqlite3
 
 from ipostudio.engines.supervisor import SERVICE_STATES
+from ipostudio.logs import redact_text
 
 __all__ = [
     "SERVICE_STATES",
@@ -1950,8 +2283,8 @@ __all__ = [
 ]
 
 _INSTANCE_COLUMNS = (
-    "id, engine, model_name, model_path, host, port, pid, state, detail, "
-    "started_at, stopped_at, created_at, updated_at"
+    "id, engine, engine_version, model_name, model_path, host, port, pid, "
+    "state, detail, started_at, stopped_at, created_at, updated_at"
 )
 
 def get_instance(conn: sqlite3.Connection, instance_id: int) -> dict | None:
@@ -1986,13 +2319,17 @@ def record_completion(
     status: str,
     detail: str = "",
 ) -> None:
+    """Persist one completion attempt.  Secret-shaped substrings are
+    redacted HERE, at the persistence boundary — display-time redaction
+    cannot unsave what was already written (Codex trust fold)."""
     with conn:
         conn.execute(
             "INSERT INTO completions (instance_id, model_name, prompt_text, "
             "output_text, prompt_chars, output_chars, duration_ms, status, detail) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (instance_id, model_name, prompt_text[:2000], output_text[:2000],
-             prompt_chars, output_chars, duration_ms, status, detail),
+            (instance_id, model_name, redact_text(prompt_text)[:2000],
+             redact_text(output_text)[:2000], prompt_chars, output_chars,
+             duration_ms, status, redact_text(detail)[:2000]),
         )
 
 def last_completion(conn: sqlite3.Connection) -> dict | None:
@@ -2056,6 +2393,7 @@ GGUF = b"GGUF" + b"\x00" * 28
 @pytest.fixture
 def service_env(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "models").mkdir()  # Codex determinism fold
     (tmp_path / "models" / "tiny-q4.gguf").write_bytes(GGUF + b"\x00" * 36)
     runner = CliRunner()
     result = runner.invoke(cli, ["config", "set", "server_port", "18400"])
@@ -2229,12 +2567,19 @@ and exit 0 even when nothing runs — the QA --json walker invokes them on a
 fresh data directory and requires exit 0."""
 
 import json
+import math
 from pathlib import Path
 
 import click
 
 from ipostudio.catalog.repo import find_model
-from ipostudio.cli.base import _SuggestingGroup, _fail, open_config_and_db
+from ipostudio.catalog.scan import shard_family_complete
+from ipostudio.cli.base import (
+    _SuggestingGroup,
+    _fail,
+    open_config_and_db,
+    open_db_only,
+)
 from ipostudio.conf.paths import resolve_data_dir
 from ipostudio.engines.discovery import resolve_engine
 from ipostudio.engines.llama_server import build_server_argv
@@ -2279,6 +2624,14 @@ def _resolve_model(conn, cfg, wanted: str | None) -> dict:
             f"model file no longer exists: {model['path']}; it may have been "
             f"moved or deleted — re-run `ipo models` to refresh the catalog"
         )
+    # insert-only catalog: a family that lost a shard after registration
+    # would crash the engine mid-load — revalidate before launch (Codex
+    # stale-row fold)
+    if not shard_family_complete(Path(model["path"])):
+        _fail(
+            f"model {model['name']!r} is incomplete on disk (a shard is "
+            f"missing); re-run `ipo models` and re-register the full set"
+        )
     return model
 
 def _warn_reserved_tuning(cfg) -> None:
@@ -2305,6 +2658,10 @@ def _warn_reserved_tuning(cfg) -> None:
 def _run_start(conn, cfg, model_name: str | None, host: str | None,
                port: int | None, timeout_s: float) -> None:
     """Shared by `ipo server start`, `ipo start` and `ipo restart`."""
+    if port is not None and not 1 <= port <= 65535:
+        _fail(f"--port must be within 1..65535, got {port}")
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        _fail("--timeout must be a finite positive number of seconds")
     if cfg.general.server_mode != "local":
         _fail(
             f"server_mode is {cfg.general.server_mode!r}; remote operation "
@@ -2400,7 +2757,7 @@ def server_start(model_name: str | None, host: str | None, port: int | None,
 @server.command("stop")
 def server_stop() -> None:
     """Stop the running server instance (idempotent)."""
-    conn, _cfg = open_config_and_db()
+    conn = open_db_only()
     try:
         stopped = stop_instance(conn)
     finally:
@@ -2408,10 +2765,15 @@ def server_stop() -> None:
     if stopped is None:
         click.echo("no running server instance")
         return
+    if stopped["state"] != "stopped":
+        # identity guard refused the kill — never claim success (Codex fold)
+        _fail(f"stop refused: {stopped['detail']}")
     click.echo(
         f"server stopped (model {stopped['model_name']}, "
         f"was http://{stopped['host']}:{stopped['port']})"
     )
+    if stopped["detail"]:
+        click.echo(f"note: {stopped['detail']}")
 
 @server.command("restart")
 @click.option("--model", "model_name", default=None, metavar="NAME")
@@ -2421,6 +2783,14 @@ def server_restart(model_name: str | None, timeout_s: float) -> None:
     """Stop then start the server (applies a new --model or config)."""
     conn, cfg = open_config_and_db()
     try:
+        # precheck BEFORE stopping (Codex DX fold): a bad request must not
+        # cost the user a running server; --model stays temporary here —
+        # `ipo restart` is the persisting shorthand
+        engine_path, problem = resolve_engine(cfg.engines.llama_cpp_path)
+        if engine_path is None:
+            _fail(problem)
+        if model_name is not None:
+            _resolve_model(conn, cfg, model_name)  # resolve-only precheck
         stop_instance(conn)
         _run_start(conn, cfg, model_name, None, None, timeout_s)
     finally:
@@ -2431,7 +2801,7 @@ def server_restart(model_name: str | None, timeout_s: float) -> None:
 @click.option("--limit", type=int, default=20, show_default=True)
 def server_list(as_json: bool, limit: int) -> None:
     """List recent server instances with their states."""
-    conn, _cfg = open_config_and_db()
+    conn = open_db_only()
     try:
         rows = recent_instances(conn, limit)
     finally:
@@ -2456,7 +2826,7 @@ def server_list(as_json: bool, limit: int) -> None:
 @click.option("--json", "as_json", is_flag=True, help="emit machine-readable output")
 def server_info(as_json: bool) -> None:
     """Show the current instance, live health and last completion."""
-    conn, _cfg = open_config_and_db()
+    conn = open_db_only()
     try:
         instance = active_instance(conn)
         completion = last_completion(conn)
@@ -2650,10 +3020,13 @@ Expected: FAIL —— unknown command 'start'；欢迎卡断言失败
 
 `src/ipostudio/cli/server_cmd.py`：
 
-1. import 区补：
+1. import 区补（Codex P0 折叠：`start --model` 调用的扫描/登记名此前缺失，会在首跑路径触发 NameError；`ConfigError` 是 save 权限/锁冲突的既有错误契约）：**Task 5 已导入 `open_db_only`，此处不得重复**：
 
 ```python
+from ipostudio.catalog.repo import upsert_models
+from ipostudio.catalog.scan import model_scan_roots, scan_model_files
 from ipostudio.cli.models_cmd import activate_model
+from ipostudio.conf.loader import ConfigError
 ```
 
 2. 文件末尾追加四个顶层命令：
@@ -2694,7 +3067,7 @@ def start(as_server: bool, model_name: str | None, timeout_s: float,
             upsert_models(conn, files)
             try:
                 activate_model(conn, model_name, cfg)
-            except (LookupError, ValueError) as exc:
+            except (LookupError, ValueError, ConfigError) as exc:
                 _fail(str(exc))
         running = active_instance(conn)
         if running is not None:
@@ -2718,7 +3091,7 @@ def start(as_server: bool, model_name: str | None, timeout_s: float,
 @click.option("--json", "as_json", is_flag=True, help="emit machine-readable output")
 def status(as_json: bool) -> None:
     """Show the default service status (exit 0 even when stopped)."""
-    conn, _cfg = open_config_and_db()
+    conn = open_db_only()
     try:
         instance = active_instance(conn)
         health = None
@@ -2751,7 +3124,7 @@ def status(as_json: bool) -> None:
 @click.command("stop")
 def stop() -> None:
     """Stop the default service (idempotent)."""
-    conn, _cfg = open_config_and_db()
+    conn = open_db_only()
     try:
         stopped = stop_instance(conn)
     finally:
@@ -2759,7 +3132,11 @@ def stop() -> None:
     if stopped is None:
         click.echo("no running server instance")
         return
+    if stopped["state"] != "stopped":
+        _fail(f"stop refused: {stopped['detail']}")
     click.echo(f"server stopped (model {stopped['model_name']})")
+    if stopped["detail"]:
+        click.echo(f"note: {stopped['detail']}")
 
 @click.command("restart")
 @click.option("--model", "model_name", default=None, metavar="NAME")
@@ -2769,6 +3146,18 @@ def restart(model_name: str | None, timeout_s: float) -> None:
     """Restart the default service (applies config and model changes)."""
     conn, cfg = open_config_and_db()
     try:
+        # precheck BEFORE stopping: a typo'd model or missing engine must
+        # never cost the user a running server (Codex DX fold); the
+        # selection persists, matching `ipo start --model` semantics
+        engine_path, problem = resolve_engine(cfg.engines.llama_cpp_path)
+        if engine_path is None:
+            _fail(problem)
+        if model_name is not None:
+            try:
+                activate_model(conn, model_name, cfg)
+            except (LookupError, ValueError, ConfigError) as exc:
+                _fail(str(exc))
+            model_name = None  # selection persisted; start resolves it
         stop_instance(conn)
         _run_start(conn, cfg, model_name, None, None, timeout_s)
     finally:
@@ -2927,13 +3316,15 @@ GGUF = b"GGUF" + b"\x00" * 28
 @pytest.fixture
 def running_service(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "models").mkdir()  # Codex determinism fold
     (tmp_path / "models" / "tiny-q4.gguf").write_bytes(GGUF + b"\x00" * 36)
     runner = CliRunner()
     assert runner.invoke(cli, ["model", "--select", "tiny-q4"]).exit_code == 0
     conn = open_db(tmp_path / "data" / "app.db")
     migrate(conn)
     port = choose_port("127.0.0.1", 18700)
-    argv = [sys.executable, str(FAKE), "--host", "127.0.0.1", "--port", str(port)]
+    argv = [sys.executable, str(FAKE), "--host", "127.0.0.1", "--port", str(port),
+            "--model", "tiny-q4.gguf"]  # /props identity surface (Codex fold)
     outcome = start_instance(
         conn, argv, engine="llama.cpp", model_name="tiny-q4",
         model_path="tiny-q4.gguf", host="127.0.0.1", port=port,
@@ -2960,11 +3351,34 @@ def test_chat_completes_against_running_server(running_service):
     assert record["prompt_text"] == "hello"
     assert record["output_text"] == "echo:hello"
 
+def test_chat_persists_null_content_as_error(running_service, monkeypatch):
+    _tmp, conn = running_service
+    from ipostudio.cli import chat_cmd
+
+    monkeypatch.setattr(
+        chat_cmd, "chat_completion",
+        lambda *a, **k: {"choices": [{"message": {"content": None}}]},
+    )
+    result = _invoke("chat", "hello")
+    assert result.exit_code == 1  # not a TypeError crash (Codex shape fold)
+    assert "must be a string" in result.stderr
+    assert last_completion(conn)["status"] == "error"
+
+def test_chat_redacts_secret_shapes_before_persist(running_service):
+    _tmp, conn = running_service
+    secret = "Bearer sk-abc123def456ghi789jkl012"
+    result = _invoke("chat", f"analyze this: {secret}")
+    assert result.exit_code == 0, result.stderr
+    stored = last_completion(conn)
+    assert secret not in (stored["prompt_text"] or "")
+    assert secret not in (stored["output_text"] or "")
+
 def test_chat_record_survives_reconnect(running_service):
     tmp_path, conn = running_service
     assert _invoke("chat", "again").exit_code == 0
     instance_id = last_completion(conn)["instance_id"]
-    conn.close()
+    # a SECOND connection sees the row; the fixture-owned connection stays
+    # open for the teardown's stop_instance (Codex determinism fold)
     fresh = open_db(tmp_path / "data" / "app.db")
     record = last_completion(fresh)
     assert record["instance_id"] == instance_id
@@ -3135,10 +3549,14 @@ def chat(prompt: str, timeout_s: float) -> None:
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
+            content = None
+        if not isinstance(content, str):
+            # presence is not type-correctness: null/number/list must take
+            # the error path, not crash on len() (Codex shape fold)
             _record_failure(conn, instance, prompt, started,
                             "malformed response payload")
             _fail("server returned a malformed response payload "
-                  "(no choices[0].message.content)")
+                  "(choices[0].message.content must be a string)")
         record_completion(
             conn, instance_id=instance["id"],
             model_name=instance["model_name"],
@@ -3245,6 +3663,7 @@ def test_engine_log_name_follows_per_process_convention():
 
 def test_missing_engine_never_fakes_readiness(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "models").mkdir()  # Codex determinism fold
     (tmp_path / "models" / "m.gguf").write_bytes(GGUF + b"\x00" * 36)
     # deterministic on every machine: the configured engine path is missing,
     # so the start fails regardless of whether llama-server is on PATH
@@ -3263,6 +3682,7 @@ def test_missing_engine_never_fakes_readiness(tmp_path, monkeypatch):
 
 def test_configured_engine_path_that_vanishes_is_reported(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "models").mkdir()  # Codex determinism fold
     (tmp_path / "models" / "m.gguf").write_bytes(GGUF + b"\x00" * 36)
     runner = CliRunner()
     runner.invoke(cli, ["model", "--select", "m"])
@@ -3319,10 +3739,15 @@ server, complete one prompt — records persist across restarts.
    `brew install llama.cpp`; on Windows grab `llama-server-<edition>-win-x64.zip`
    from the same releases page, or `winget install ggml.llama.cpp`). Or point
    the `llama_cpp_path` setting at the executable:
-   `ipo config set llama_cpp_path "C:\llama\llama-server.exe"`.
+   `ipo config set llama_cpp_path "C:\llama\llama-server.exe"`. On Linux,
+   unpack the release build for your architecture onto your `PATH`
+   (e.g. `~/.local/bin`).
 2. Download any small instruct GGUF (e.g. Qwen2.5-0.5B-Instruct or
-   Llama-3.2-1B-Instruct from Hugging Face or ModelScope) and drop it into
-   `<data-dir>\models` (default `~/.ipostudio/models`), or register another
+   Llama-3.2-1B-Instruct from Hugging Face or ModelScope — with
+   `pip install huggingface_hub` a single `huggingface-cli download
+   <repo-id> --include *.gguf --local-dir .` fetches one) and drop it into
+   `<data-dir>\models` (default `~/.ipostudio/models`; `ipo doctor --fix`
+   creates the directory if it does not exist yet), or register another
    directory: `ipo config set model_dirs -- '["D:/models"]'`.
 3. Run the loop:
 
@@ -3342,7 +3767,17 @@ with the engine-supervision plan). Model downloading and engine installation
 stay manual until the model-management plan lands its downloader. Use a
 recent llama.cpp release: `server_flash_attn: on/off` needs a build whose
 `llama-server` accepts valued `--flash-attn` (the default `auto` omits the
-flag and works everywhere).
+flag and works everywhere). Chat records are redacted for secret-shaped
+tokens (Bearer / `sk-`…) at the persistence boundary and stay in the local
+SQLite file; retention controls arrive with the model-management plan. The
+engine writes its own stdout/stderr verbatim to `logs/engine-llama-cpp.log`
+— display is redacted, but treat that file as raw engine output.
+`ipo server stop` proves port ownership against the engine's `/props`
+document before signaling and refuses a foreign listener. Shorthand
+semantics: `ipo start --model NAME` persists the selection; `ipo server
+start/restart --model NAME` overrides for that command only; `ipo start` is
+a no-op success when a server is already running, while `ipo server start`
+reports the conflict as an error.
 ```
 
 `CHANGELOG.md` 顶部新增 Unreleased 条目（沿用现有格式）：
@@ -3361,22 +3796,34 @@ flag and works everywhere).
 - `ipo chat PROMPT`: one non-streaming completion against the running server
   via its OpenAI-compatible endpoint; every attempt (ok or error) is recorded
   in a new `completions` table and visible after restarts.
+- Stop safety: `ipo server stop` proves port ownership against the engine's
+  `/props` document before signaling; a foreign listener is refused with
+  manual guidance, a silent port sends no signal, and a timed-out startup
+  terminates its engine instead of orphaning it.
 - `engines.llama_cpp_path` config key (empty = resolve `llama-server` from
   PATH).
+- Config files are stamped with `config_version` on save so a downgrade
+  degrades gracefully instead of rejecting a config this build wrote;
+  conversation records are redacted for secret-shaped tokens at the
+  persistence boundary.
+- `ipo guide`/`ipo help` now document command arguments and subcommand
+  options (server/config children included).
 - First-run welcome card now points initialized users at `ipo models`.
 ```
 
-`docs/design/roadmap.md` 的 "里程碑 M0′" 节末尾追加（回写切片结论）。**回写门（CEO 评审 #2）**：回写文本必须区分两类验证——假引擎自动化验证（已完成）与真机小模型冒烟（手动门）。若真机冒烟已由执行者/用户完成并成功，写"已完成真机冒烟"；否则必须写"真机冒烟待用户执行，P2 入口条件以前者为最终标准"。Task 8 的执行者在推送前于开发机执行下方真实冒烟清单（有真实 llama.cpp 与任意小 GGUF 时）：
+`docs/design/roadmap.md` 的 "里程碑 M0′" 节末尾追加（回写切片结论）。**回写门（CEO 评审 #2）**：回写文本必须区分两类验证——假引擎自动化验证（已完成）与真机小模型冒烟（手动门）。若真机冒烟已由执行者/用户完成并成功，写"已完成真机冒烟"；否则必须写"真机冒烟待用户执行，P2 入口条件以前者为最终标准"。Task 8 的执行者在推送前于开发机执行下方真实冒烟清单（有真实 llama.cpp 与任意小 GGUF 时；**自 Task 4 supervisor 落地起即可手动执行，不必等到 Task 8**——Codex CEO/ENG 时序折叠）。**P2 立项门槛（Codex CEO 折叠）：** 技术连通不构成继续投入的证据——P2 立项前须有一类明确用户用自有材料完成一次真实任务，且相对其现有做法可测改善。**止损线：** 真机冒烟失败且当日无法定位修复，则停止后续投入并向用户回报（仅保留文档与回写收尾）：
 
 ```text
 # Manual real-model smoke (one-time gate for the M0' writeback):
 # 1. install llama.cpp, put llama-server on PATH (README quickstart)
 # 2. drop any small .gguf into ~/.ipostudio/models
+#    (record the download time — the writeback separates it from TTHW)
 ipo doctor --fix
 ipo models            # the real GGUF appears
 ipo model --select <name>
 ipo server start      # real engine loads the real weights
 ipo chat "hello"      # a real answer comes back
+#    -> record time-to-first-answer separately (TTHW evidence, Codex fold)
 ipo server info       # record shows the exchange
 ipo server stop
 ```
@@ -3427,16 +3874,16 @@ ipo server stop
 - **Priority:** P2（优先级），时序 P3 前
 - **Depends on:** TODO-004
 
-## TODO-016: stop 的进程身份加固（P3 前）
-- **What:** `stop_instance` 记录并比对引擎进程的启动时刻/进程身份（create_time），替代"端口健康应答即放行 kill"的启发式；端口应答无法与记录 PID 建立关联时拒绝 kill 并如实报告。
-- **Why:** PID 重用 + 端口被第三方复用时，现有 port+health 双确认仍可能误杀占端口的无关进程（概率低但非零）——这是用户机器上的信任问题（CEO 评审 #5 提级）。
-- **Context:** 核心回路计划范围裁决 #6；跨平台进程身份探需无分支实现设计。
+## TODO-016: stop 的 PID 级身份加固（P3 前）
+- **What:** 文档级身份证明已在本计划交付（`probe_identity` /props 模型守卫：owned 才发信号、foreign 拒绝并如实留行、absent 不发信号——Codex 三声部折叠，替代旧"端口健康应答即放行"启发式）。余下为 PID 级加固：记录引擎进程启动时刻/create_time 并比对，覆盖"记录 PID 被回收而端口仍服务本模型"的残余窗口。
+- **Why:** /props 守卫把误杀面从"任何 200/503 应答"收窄到"端口上确是本模型"，但 PID 与端口文档的绑定仍是间接推断；PID 重用窗口内的 kill 仍是用户机器信任问题。
+- **Context:** 核心回路计划范围裁决 #6 + Codex 停止安全折叠；跨平台进程身份探需无分支实现设计。
 - **Effort:** human: M / CC: M
 - **Priority:** P2（优先级），时序 P3 前
 - **Depends on:** 无
 
 ## TODO-019: 竞争转向触发器与楔子 MVP 排位（下一计划入口）
-- **What:** 为"本地运行层"（下载/运行/对话的商品层）写明竞争转向判据；把 CEO 评审 #6 的楔子 MVP 建议（docparse+知识库 / 多引擎网关 / 跨工具记忆 三选一先做）列为下一轮路线图排位的必答题。
+- **What:** 为"本地运行层"（下载/运行/对话的商品层）写明竞争转向判据；把 CEO 评审 #6 的楔子 MVP 建议（docparse+知识库 / 多引擎网关 / 跨工具记忆 三选一先做）列为下一轮路线图排位的必答题。**判据具体化（Codex CEO 折叠）：** 旧触发条件"在位者接管全部用户价值"几乎不可操作——下一轮基础设施投入前必须选定一个楔子方向并写明试用入口、替换对象、成功指标与停止日期；选定前商品层不再吸收结构性投入。
 - **Why:** 本层存在成熟免费在位者（Ollama/LM Studio）；产品差异化在楔子层。无触发器时后续计划可能继续在商品层加码（CEO 评审 #6）。
 - **Context:** roadmap M0′ 回写已含触发器文本（核心回路计划 Task 8）；下一计划排位时由 CEO 双声部裁决。
 - **Effort:** human: S / CC: S
@@ -3460,16 +3907,16 @@ ipo server stop
 - **Depends on:** P6 对话
 
 ## TODO-021: 模型目录剪枝（P2）
-- **What:** `ipo models`/扫描时与文件系统对账：消失的文件从 models 表移除或标记 missing；P2 下载器落地时并入完整生命周期。
-- **Why:** 目录是 insert-only（ENG Finding 3），已删模型靠 _resolve_model 的存在性检查兜底（本计划已折入），列表仍会显示幽灵行。
+- **What:** `ipo models`/扫描时与文件系统对账：消失的文件从 models 表移除或标记 missing；P2 下载器落地时并入完整生命周期。本计划已交付：`_resolve_model` 的存在性+分片族完整性复核（启动前）、列表 `(missing)` 标注；本项补移除/清理，并把 **path-addressable 激活**（同名不同目录时按路径激活，Codex DX 死循环折叠的根治）随本项一并设计。
+- **Why:** 目录是 insert-only（ENG Finding 3），已删模型靠启动前复核兜底；同名歧义在 ENG F2 下被拒绝且 P2 前无解，需与剪枝同设计。
 - **Context:** 核心回路计划 ENG 评审 F3；P2 模型管理的主责面。
 - **Effort:** human: S / CC: S
 - **Priority:** P2
 - **Depends on:** P2 模型管理
 
 ## TODO-022: start 的检查-生成序列化（P2 多入口前）
-- **What:** `ipo server start` 的 active-instance 检查与 INSERT 分处两个 autocommit 步骤，两个并发 start 可各自生成引擎；用 `BEGIN IMMEDIATE` 事务（migrate() 先例）或 ConfigStore 式咨询锁把"检查+登记"包成单序列化段。
-- **Why:** 竞态窗口内出现两行 running 与一个孤儿引擎，stop 只能收编最新一行（ENG Finding 4，conf 8/10）。
+- **What:** `ipo server start` 的 active-instance 检查与 INSERT 分处两个 autocommit 步骤，两个并发 **CLI 进程** start 可各自生成引擎；用 `BEGIN IMMEDIATE` 事务（migrate() 先例）或 ConfigStore 式咨询锁把"检查+登记"包成单序列化段。本计划已交付**进程内**一半（Codex ENG 竞态折叠）：`_touch(expect=...)` 条件状态转换 + stop 条件写 + 败者 terminate，start/stop 交错已有测试；跨进程双 start 仍在。
+- **Why:** 进程内交错已闭环；跨进程窗口内仍可出现两行 running 与一个孤儿引擎。
 - **Context:** 核心回路计划 ENG 评审；P2 GUI/嵌入方进程内调用落地前完成。
 - **Effort:** human: S / CC: S
 - **Priority:** P2（优先级），时序 P2 落地前
@@ -3478,10 +3925,23 @@ ipo server stop
 ## TODO-020: --json 输出方言收敛（P7 前）
 - **What:** 列表型 `--json` 现为 pretty 单文档（与 version/doctor/config 一致）；§9.11 的 NDJSON 事件方言（start/event/chunk/result）属 agent run/chat 流式场景。P7 设计事件流时明确两方言边界并写入门面文档。
 - **Why:** 防止 P6/P7 事件流与既有列表方言冲突（CEO 评审 #7）。
-- **Context:** 核心回路计划 Section 7/10 评审；walker 契约（json.loads）对两者兼容。
-- **Effort:** human: S / CC: S
-- **Priority:** P7
 - **Depends on:** P6/P7
+
+## TODO-023: 会话记录保留策略与删除工具（P2）
+- **What:** `completions` 表默认保存（已脱敏的）交换内容且无删除入口；P2 提供 `chat --no-save` 与记录清除命令（或等价面），README 写明保留策略（Codex CEO/DX/ENG 三声部信任折叠）。
+- **Why:** 本地单机存储风险有限，但"默认永久保存用户提示"应有明示出口；脱敏已在持久化边界交付，本项补控制面。
+- **Context:** 核心回路计划 Codex 信任折叠；与 P2 模型管理的隐私文档共用一节。
+- **Effort:** human: S / CC: S
+- **Priority:** P2
+- **Depends on:** P2 模型管理（文档面共用）
+
+## TODO-024: 监听地址与连接地址分离（P3 前）
+- **What:** `server_host` 为 `0.0.0.0` 等通配地址时，健康探测/聊天请求/展示直接复用监听地址；按地址族推导可连接地址（回环优先）并统一 IPv6 URL 括号（Codex ENG 折叠；`choose_port` 的 IPv6 绑定面已随本计划交付）。
+- **Why:** 通配监听在部分栈上可连、部分栈上不可连；`http://0.0.0.0:port` 的展示对用户无操作意义。
+- **Context:** 核心回路计划 Codex 网络地址折叠；多实例/远程面（P3/P4）前完成。
+- **Effort:** human: S / CC: S
+- **Priority:** P3
+- **Depends on:** 无
 ```
 
 - [ ] **Step 4: 全量回归 + ruff + 提交**
@@ -3508,7 +3968,7 @@ Expected: 三平台矩阵全绿。
 
 1. **规格覆盖**：§5.2 本地管理切片→T1/T2；§5.3 最小切片（启停/端口避让/活动模型/明确报告）→T3/T4/T5；§9.11 `start`/`status/stop/restart`/`server.*`/`models`/`model --select`/`model-info`→T5/T6/T2；§9.12 CLI 对话→T7；§10.1/10.2→T1/T4（字面量 CHECK 钉死 + QA 守卫）；§11.2 `llama_cpp_path` 为增量登记键（ADR-003"键族按子项目增量登记"），三处同步点已写入 T3；§12.1/§13（空态引导/不完整权重跳过/截断提示/失败原因与重试入口=stop+start）→T1/T2/T4/T5；§15（端口≤20 候选、本地 600s）→T4/T5/T7。M0′ 切片五步（装引擎→下模型→一次补全→落盘→重启可查）全部有命令承载，T8 回写 roadmap。**刻意不覆盖**（有据）：T02/T03/T04 下载器（P2）、T05/T06 多实例（P3）、流式（P6）、网关（P4）。
 2. **占位符扫描**：无 TBD/TODO 式空步；无"实现略"式步骤；无行内勘误——所有代码块即最终形态。
-3. **类型一致性**：`find_model` 返回 `list[dict]` 全线一致；`start_instance(conn, argv, *, engine, model_name, model_path, host, port, log_path, timeout_s, poll_interval, probe, spawn)` 在 T4 定义、T5/T6/T7 调用一致；`_run_start(conn, cfg, model_name, host, port, timeout_s)` T5 定义、T6 复用一致；`SERVICE_STATES` 单一定义于 supervisor.py、repo.py 再导出；`resolve_engine`/`build_server_argv` 的 monkeypatch 点（T5 测试）与 T3 的模块属性名一致；`activate_model` 的 LookupError/ValueError 契约在 T2 定义、T6 捕获一致；monkeypatch 目标 `chat_cmd.chat_completion` 与 T7 的 `from ... import chat_completion` 导入形态一致（补丁生效）。
+3. **类型一致性**：`find_model` 返回 `list[dict]` 全线一致；`start_instance(conn, argv, *, engine, model_name, model_path, host, port, log_path, timeout_s, poll_interval, probe, spawn)` 在 T4 定义、T5/T6/T7 调用一致；`_run_start(conn, cfg, model_name, host, port, timeout_s)` T5 定义、T6 复用一致；`SERVICE_STATES` 单一定义于 supervisor.py、repo.py 再导出；`stop_instance` 的 `identify=probe_identity` 注入点与 `_touch(expect=...)` 条件写在 T4 定义、T5/T6 调用一致；`open_db_only` 于 T2 定义、T5/T6 的五个 conn-only 命令面使用；`resolve_engine`/`build_server_argv` 的 monkeypatch 点（T5 测试）与 T3 的模块属性名一致；`activate_model` 的 LookupError/ValueError 契约在 T2 定义、T6 捕获一致；monkeypatch 目标 `chat_cmd.chat_completion` 与 T7 的 `from ... import chat_completion` 导入形态一致（补丁生效）。
 
 <!-- autoplan-accepted:ceo -->
 - 模式：SELECTIVE EXPANSION（autoplan 覆盖）；14 项范围裁决（计划头部，含 #14 M0 上限诚实标注）全部生效，执行者不得扩大。
@@ -4037,3 +4497,84 @@ DX IMPLEMENTATION CHECKLIST
 - `_SuggestingGroup` 命令建议 — 新命令组自动继承
 - guide 注册表驱动 — 新命令自动入册
 - 错误三段式契约 + QA walker --json 洁净守卫 — 新命令全继承
+
+## Codex 补充声部（复跑成功，2026-10-05）
+
+前三阶段评审期间 Codex 外部声部三次不可用（`workspace routing discovery timed out`，各阶段 close packet 已如实记录 `outside_status: unavailable`）。用户指令复跑：探测 auth/model/烟雾测试全过（codex-cli 0.159.1，模型 gpt-6-astra）；三份阶段提示词 = 边界声明 + 阶段对抗指令 + 前序共识摘要 + **计划实现节全文（156KB，经 stdin 规避 Windows 32KB argv 上限，无截断——上轮 26KB 截断的根因即 argv 限制）**；read-only 沙箱挂仓库根，允许只读核对源码声明。三路 `codex exec` 并行，全部 exit 0，`outside-review-result.ts` 校验通过（Recommendation 行齐备）。原始输出存档：`~/.gstack/projects/ipostudio/codex-outside-{ceo,dx,eng}-response.txt`。
+
+### CEO 外部声部 — 10 条（8×P1、2×P2）
+
+| # | 级 | 发现（缩写） | 裁决 | 落点 |
+|---|----|--------------|------|------|
+| CX1 | P1 | 验收只证技术连通，缺用户价值证据 | ACCEPT（文档） | roadmap 回写门：P2 立项门槛 = 明确用户真实任务+可测改善；止损线 |
+| CX2 | P1 | 自建监管是循环论证（规格要求自建≠价值证明） | ACCEPT（文档） | ADR-011 已有外部端点优先逃生门；TODO-019 具体化对比承诺（见 Challenge ①） |
+| CX3 | P1 | TODO-019 触发条件不可操作 | ACCEPT（文档） | TODO-019 具体化：选定一楔子+入口/替换对象/指标/停止日期（见 Challenge ②） |
+| CX4 | P1 | 首跑范围排除了新手又没给熟手机会 | ACCEPT（文档） | Goal 增目标用户段（终端熟手；新手路径归 P2 下载器） |
+| CX5 | P1 | 可靠性已是本次承诺而非未来增强 | ACCEPT（代码） | 超时终止孤儿进程 + 条件状态转换（见 DXF2/EXF2/EXF3） |
+| CX6 | P1 | 默认保存对话无召回验证、无数据控制 | PARTIAL（代码+TODO-023） | 持久化边界脱敏 + QA 密钥样本；默认保存保留（本地库+重启可见裁决）；opt-out/清除入 TODO-023 |
+| CX7 | P2 | 非流式单轮 chat 场景不明 | ACCEPT（文档） | Goal 定位：冒烟/诊断探针；流式 TODO-018 |
+| CX8 | P2 | 工程约束替代用户决策（--server 恒开、model-info 必填名、R1） | REJECT（已裁决） | 三者均既有范围裁决/规格要求；--server 帮助文本已说明；语义不对称补 README（见 DXF11） |
+| CX9 | P2 | 八任务 timebox 无预算无止损；真机验证太靠后 | ACCEPT（文档） | 冒烟清单标注"Task 4 起可执行"+止损线入回写门 |
+
+### DX 外部声部 — 12 条（1×P0、7×P1、4×P2）
+
+| # | 级 | 发现（缩写） | 裁决 | 落点 |
+|---|----|--------------|------|------|
+| DXF0 | **P0** | `ipo start --model` 缺 import → NameError 首跑崩溃 | **ACCEPT（代码）** | Task 6 import 区补 scan/upsert/activate/ConfigError（与 ENG 交叉印证） |
+| DXF1 | P1 | guide 收集器：Argument 当选项、不递归子命令 | PARTIAL（代码） | 收集器升级（参数/子命令递归）；"崩溃"说法核实为不准（`Argument.help` 恒 None 不炸），缺口是完整性 |
+| DXF2 | P1 | 启动超时留活引擎且 stop 不可达 | ACCEPT（代码） | 超时即 terminate+escalate；failed 行如实"已终止"（三声部一致） |
+| DXF3 | P1 | stop 无 PID 所有权证明，健康 200/503 即放行 kill | ACCEPT（代码） | `probe_identity` /props 模型文档守卫：owned 才发信号/foreign 拒绝/absent 不发；TODO-016 改 PID 级残余 |
+| DXF4 | P1 | README quickstart 非 5 分钟、不可复制 | ACCEPT（文档） | Linux 安装行、huggingface-cli 下载示例、doctor 先建目录、下载/TTHW 分记 |
+| DXF5 | P1 | 同名歧义死循环（唯一路径也被拒+幽灵行） | PARTIAL（代码+TODO-021） | 拒绝消息精确化；列表 `(missing)` 标注；path-addressable 激活入 TODO-021 设计面 |
+| DXF6 | P1 | save 不盖版本戳 → 降级读坏档 | ACCEPT（代码） | loader.save() 盖 `config_version` + 测试（Task 3） |
+| DXF7 | P1 | completions 原文落盘违反凭据契约 | ACCEPT（代码） | `record_completion` 持久化边界 `redact_text` + 密钥样本测试（与 CEO/ENG 一致） |
+| DXF8 | P2 | `model --select --json` 输出自然语言 | ACCEPT（代码） | 选择分支结构化 JSON（与 ENG EXF16 一致） |
+| DXF9 | P2 | 激活成功提示与环境覆盖矛盾 | ACCEPT（代码） | `IPO_LOCAL_CHAT_MODEL` 覆盖警告接入 model --select |
+| DXF10 | P2 | ConfigError/权限/SQLite 错误逃逸成 traceback；content null 崩溃 | ACCEPT（代码） | 三处 `(LookupError, ValueError, ConfigError)` 收口 + `isinstance(content, str)` 守卫 |
+| DXF11 | P2 | start/server 语义不对称；restart 先停后验 | ACCEPT（代码+文档） | 两个 restart 先验引擎+模型再停；语义四行入 README Notes |
+
+### ENG 外部声部 — 17 条（9×P1、8×P2）
+
+| # | 级 | 发现（缩写） | 裁决 | 落点 |
+|---|----|--------------|------|------|
+| EXF1 | P1 | stop 身份守卫不足（同 DXF3） | ACCEPT | 同 DXF3 |
+| EXF2 | P1 | 超时孤儿（同 DXF2） | ACCEPT | 同 DXF2 |
+| EXF3 | P1 | 生命周期竞态：stop 可在写 PID 前标 stopped，start 随后复活 | ACCEPT（代码） | `_touch(expect=...)` 条件转换 + stop 条件写 + 败者 terminate + 交错测试 |
+| EXF4 | P1 | 健康失败当进程退出，虚报停止 | ACCEPT | 身份守卫三分支：absent → 不发信号+如实 detail |
+| EXF5 | P1 | extra_args 可覆盖 --host/--port/--model | ACCEPT（代码） | build_server_argv 托管旗标校验 + ValueError |
+| EXF6 | P1 | 坏配置阻断 stop（事故恢复死锁） | ACCEPT（代码） | base.open_db_only；五个 conn-only 命令面（stop×2/status/list/info）脱离配置加载 |
+| EXF7 | P1 | 相对路径跨 cwd 不稳定、重复登记 | ACCEPT（代码） | model_scan_roots `resolve()` + chdir 测试 |
+| EXF8 | P1 | 陈旧行绕过完整性检查（截断/丢分片照常启动） | PARTIAL（代码） | `shard_family_complete` 启动前复核 + 列表标注；目录剪枝仍 TODO-021 |
+| EXF9 | P2 | 分片数量相等≠序号连续（{1,3}-of-2 通过） | ACCEPT（代码） | 序号集合==1..N 校验 + 反例测试 |
+| EXF10 | P2 | 扫描预算只限 GGUF 候选且 scandir 全量物化 | ACCEPT（代码） | 流式 scandir + `MAX_SCAN_VISITED` 全局访问预算 + 测试 |
+| EXF11 | P2 | IPv6 主机 choose_port 必败；监听/连接地址混用 | PARTIAL（代码+TODO-024） | choose_port 按主机字面选地址族 + 65536 上限；连接地址推导入 TODO-024 |
+| EXF12 | P2 | 端口 65535→65536 OverflowError；--port 0/负数、非有限 timeout | ACCEPT（代码） | choose_port 范围钳制 + _run_start 边界校验 |
+| EXF13 | P1 | 交换内容与引擎日志违反凭据不落盘（同 DXF7） | ACCEPT | 同 DXF7；引擎日志为引擎进程直写，展示脱敏+README 残余声明 |
+| EXF14 | P2 | chat 响应类型不校验（null/数字/列表崩溃） | ACCEPT（代码） | 同 DXF10 + null 用例 |
+| EXF15 | P2 | ConfigError 逃逸 + 环境覆盖语义（同 DXF9/10） | ACCEPT | 同 DXF9/10 |
+| EXF16 | P2 | select --json 违反契约（同 DXF8） | ACCEPT | 同 DXF8 |
+| EXF17 | P1 | 代码块同步缺陷：Task 6 缺 import（同 DXF0）；两处 `_INSTANCE_COLUMNS` 均缺 `engine_version`，e2e 读取必 KeyError | **ACCEPT（代码）** | 两处列清单补 `engine_version`（与 1547 行 e2e 断言闭合） |
+| — | P1 | 测试确定性四处失败（写前未建目录×5、包级样式守卫误杀 ui.py、prefers_latest 断言错误、重连测试关掉 fixture 连接） | **ACCEPT（代码）** | 五处 mkdir、ui.py 豁免、断言改为"停最新后旧行仍 active"、二次连接替戏 close |
+
+（ENG 另两条时序/止损建议与 CX9 同项合并。）
+
+### 三声部一致项（单声部关键发现升级为共识）
+
+1. **超时孤儿进程**（CEO+DX+ENG）：start 超时旧行为"标 failed 留活进程"，而 stop 只查活动态 → 用户照错误提示操作也无法回收。折叠：超时即终止+升级杀，detail 如实。
+2. **stop 身份守卫**（DX+ENG）：健康 200/503 不能证明 PID 所有权。折叠：/props 模型文档证明，foreign 拒绝、absent 不发信号；TODO-016 降级为 PID 级残余加固。
+3. **completions 信任面**（CEO+DX+ENG）：原文入库+回显是凭据泄漏路径。折叠：持久化边界 `redact_text` + 真实形状密钥 QA；控制面 TODO-023。
+4. **真机验证时序**（CEO+ENG）：全部实现后才碰真机=最大不确定性最后暴露。折叠：Task 4 起可手动冒烟 + 止损线 + P2 立项门槛。
+
+### User Challenges 更新（三声部印证，仍待用户裁决）
+
+- **Challenge ①（外部端点优先 vs 自建监管）**：Codex CEO 独立提出"循环论证"批评（CX2），与原 Challenge 同向。已折入 ADR-011 对比承诺与 TODO-019 具体化；**方向选择仍属用户**。
+- **Challenge ②（楔子 MVP 排位）**：Codex CEO 独立批评原触发条件不可操作（CX3），与原 Challenge 同向。TODO-019 已具体化为"选定一楔子+试用入口/替换对象/成功指标/停止日期"；**选哪个楔子仍属用户**。
+- **新 Challenge ③（会话记录默认保存）**：三声部一致要求控制面。本计划折入脱敏+QA；若用户要求 M0′ 即带 `--no-save`/清除命令（而非 TODO-023 到 P2），批准门时说明即可，为一个小型范围追加。
+
+### 折叠清单（70 处替换）
+
+Task 1 扫描（流式+访问预算+序号连续性+绝对路径身份+family_complete+4 测试）；Task 2（collector 升级、open_db_only、select --json/ConfigError/覆盖警告、激活消息、missing 标注、样式守卫豁免、fixture mkdir）；Task 3（托管旗标校验、/props 替身面、loader 版本戳+测试）；Task 4（`_INSTANCE_COLUMNS`×2 补 engine_version、条件状态机、超时终止、身份守卫重写 stop、6 个新/改测试）；Task 5（族完整性复核、端口/超时边界、五个 db-only 面、stop 拒绝语义、restart 预检、record 脱敏、fixture 修正）；Task 6（P0 import 修复、ConfigError、restart 预检+持久语义、stop 拒绝语义）；Task 7（content 类型守卫、重连测试修正、null/脱密测试）；Task 8（README 四处、CHANGELOG 三条、TODO-016/019/021/022 更新、TODO-023/024 新增、约束行、冒烟清单时序）。
+
+### 声部结论
+
+Codex 三阶段 Recommendation 均为 `revise before implementation`；上述 70 处修订即按其意见完成并逐条核实过计划原文（DX 的"collector 崩溃"一项核实为不准确，已按真实缺口折叠并注明）。本节起本计划具备完整外部声部覆盖：**OUTSIDE COVERAGE: codex × ceo/dx/eng completed（2026-10-05 复跑）**。
