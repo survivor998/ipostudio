@@ -73,11 +73,11 @@ def test_every_json_capable_command_stays_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli_main, "use_color", lambda: True)
     cases = sorted(_json_invocations())
-    assert {"version --json", "doctor --json", "config path --json", "config list --json",
-            "models --json", "model --json", "status --json",
-            "server info --json", "server list --json"} <= {
-        " ".join(args) for args in cases
-    }
+    assert {
+        "version --json", "doctor --json", "config path --json", "config list --json",
+        "models --json", "model --json", "status --json",
+        "server list --json", "server info --json",
+    } <= {" ".join(args) for args in cases}
     for args in cases:
         result = CliRunner().invoke(cli, args, color=True)
         assert result.exit_code == 0, (args, result.output)
