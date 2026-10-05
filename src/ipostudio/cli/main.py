@@ -11,6 +11,7 @@ from typing import Any
 import click
 
 from ipostudio import __version__
+from ipostudio.cli.base import _SuggestingGroup
 from ipostudio.cli.ui import check_line, use_color
 from ipostudio.conf.loader import (
     CREDENTIAL_KEYS,
@@ -108,43 +109,33 @@ def _force_utf8_streams() -> None:
 
 
 def collect_command_docs() -> list[dict]:
-    docs = []
-    for name, command in sorted(cli.commands.items()):
-        docs.append(
-            {
-                "name": name,
-                "help": command.help or "",
-                "options": [
-                    {"flag": option.opts[0] if option.opts else "", "help": option.help or ""}
-                    for option in command.params
-                ],
-            }
-        )
-    return docs
+    def doc_for(command: click.Command) -> dict:
+        options: list[dict] = []
+        arguments: list[dict] = []
+        for param in command.params:
+            if isinstance(param, click.Argument):
+                arguments.append(
+                    {"name": (param.name or "").upper(),
+                     "required": param.required}
+                )
+            else:
+                options.append(
+                    {"flag": param.opts[0] if param.opts else "",
+                     "help": param.help or ""}
+                )
+        doc: dict = {
+            "name": command.name,
+            "help": command.help or "",
+            "options": options,
+            "arguments": arguments,
+        }
+        if isinstance(command, click.Group):
+            doc["commands"] = [
+                doc_for(sub) for _, sub in sorted(command.commands.items())
+            ]
+        return doc
 
-
-class _SuggestingGroup(click.Group):
-    """Turn unknown-command errors into actionable ones and keep every
-    click-rendered surface under the presentation color gate.  The UsageError
-    contract (exit code 2) is preserved — only the message improves."""
-
-    def make_context(self, info_name, args, parent=None, **extra):
-        # eager --help exits during parsing, before any callback runs: the
-        # color gate must be applied at context construction (DX F6)
-        extra.setdefault("color", use_color())
-        return super().make_context(info_name, args, parent=parent, **extra)
-
-    def resolve_command(self, ctx: click.Context, args: list[str]):
-        try:
-            return super().resolve_command(ctx, args)
-        except click.UsageError as exc:
-            name = args[0] if args else ""
-            hint = suggest_key(name, pool=self.commands)
-            # ctx=ctx keeps click's usage block on the rewritten error (ENG F6)
-            raise click.UsageError(
-                f"unknown command {name!r}{hint}; run `ipo --help` to list commands",
-                ctx=ctx,
-            ) from exc
+    return [doc_for(command) for _, command in sorted(cli.commands.items())]
 
 
 @click.group(
@@ -184,22 +175,54 @@ def version(as_json: bool) -> None:
 
 
 def _render_docs(docs: list[dict], fmt: str) -> str:
+    def argument_line(argument: dict) -> str:
+        # click.Argument.help is always None, so the label carries the shape
+        # instead of (absent) help text (Codex DX fold)
+        kind = "required argument" if argument["required"] else "argument"
+        return f"- `<{argument['name']}>`: {kind}"
+
     if fmt == "json":
         return json.dumps(docs, ensure_ascii=False, indent=2)
     if fmt == "markdown":
         lines = ["# ipo command reference", ""]
         for doc in docs:
             lines += [f"## {doc['name']}", "", doc["help"] or "(no description)", ""]
+            for argument in doc["arguments"]:
+                lines.append(argument_line(argument))
             for option in doc["options"]:
                 lines.append(f"- `{option['flag']}`: {option['help']}")
+            for sub in doc.get("commands", []):
+                lines += [
+                    f"### {doc['name']} {sub['name']}",
+                    "",
+                    sub["help"] or "(no description)",
+                    "",
+                ]
+                for argument in sub["arguments"]:
+                    lines.append(argument_line(argument))
+                for option in sub["options"]:
+                    lines.append(f"- `{option['flag']}`: {option['help']}")
+                lines.append("")
             lines.append("")
         return "\n".join(lines)
     lines = []
     for doc in docs:
-        flags = " ".join(f"[{o['flag']}]" for o in doc["options"])
-        lines.append(f"ipo {doc['name']} {flags}".rstrip())
+        # token join, not f-string splicing: argument-less commands must keep
+        # the historical single-space usage line ("ipo version [--json]")
+        tokens = [f"ipo {doc['name']}"]
+        tokens += [f"<{a['name']}>" for a in doc["arguments"]]
+        tokens += [f"[{o['flag']}]" for o in doc["options"]]
+        lines.append(" ".join(tokens))
         if doc["help"]:
             lines.append(f"    {doc['help']}")
+        # second-level entries: one indented usage line (+ help) per subcommand
+        for sub in doc.get("commands", []):
+            sub_tokens = [f"ipo {doc['name']} {sub['name']}"]
+            sub_tokens += [f"<{a['name']}>" for a in sub["arguments"]]
+            sub_tokens += [f"[{o['flag']}]" for o in sub["options"]]
+            lines.append("  " + " ".join(sub_tokens))
+            if sub["help"]:
+                lines.append(f"        {sub['help']}")
     return "\n".join(lines)
 
 
@@ -652,9 +675,12 @@ def list_keys(as_json: bool) -> None:
     # single-user CLI makes the window microseconds — two-read simplicity is
     # kept over a data-layer load_with_sources() refactor (P5/P3)
     rows: list[dict] = []
-    for family, model in FAMILIES.items():
+    # `schema_model`, not `model`: the models_cmd import at the bottom of this
+    # module owns the bare `model` name (ruff F402), so the loop variable must
+    # not shadow it (behavior-neutral rename; loop body is unchanged)
+    for family, schema_model in FAMILIES.items():
         section = getattr(cfg, family)
-        for key in model.model_fields:
+        for key in schema_model.model_fields:
             env_var = f"IPO_{key.upper()}"
             if key in CREDENTIAL_KEYS:
                 # JSON source stays an atomic origin token (DX F2): the
@@ -707,3 +733,10 @@ def list_keys(as_json: bool) -> None:
                 # plus both possible origins
                 marker = "  [credential: masked — set via settings file or IPO_X]"
             click.echo(f"  {row['key']:<{width}} = {display}{marker}")
+
+
+from ipostudio.cli.models_cmd import model, model_info, models
+
+cli.add_command(models)
+cli.add_command(model)
+cli.add_command(model_info)

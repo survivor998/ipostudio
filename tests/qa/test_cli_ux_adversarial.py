@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import click
 import pytest
@@ -72,7 +73,8 @@ def test_every_json_capable_command_stays_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli_main, "use_color", lambda: True)
     cases = sorted(_json_invocations())
-    assert {"version --json", "doctor --json", "config path --json", "config list --json"} <= {
+    assert {"version --json", "doctor --json", "config path --json", "config list --json",
+            "models --json", "model --json"} <= {
         " ".join(args) for args in cases
     }
     for args in cases:
@@ -82,12 +84,20 @@ def test_every_json_capable_command_stays_clean(tmp_path, monkeypatch):
         json.loads(result.output)  # and parseable
 
 
-def test_main_py_never_styles_directly():
+def test_cli_package_never_styles_directly():
     # all human-facing styling routes through cli/ui.py, so the NO_COLOR and
-    # tty degradation contract cannot be bypassed by a future command (F4b)
-    source = inspect.getsource(cli_main)
-    assert "click.style" not in source
-    assert "click.secho" not in source
+    # tty degradation contract cannot be bypassed by any module in the
+    # package (models/server/chat land in their own files from the core loop)
+    cli_dir = Path(inspect.getsourcefile(cli_main)).parent
+    offenders = []
+    for py in sorted(cli_dir.glob("*.py")):
+        if py.name == "ui.py":
+            continue  # the sanctioned styling boundary itself (Codex fold:
+            # the guard as written flagged its own exempt module)
+        source = py.read_text(encoding="utf-8")
+        if "click.style" in source or "click.secho" in source:
+            offenders.append(py.name)
+    assert offenders == []
 
 
 def test_ui_helpers_tolerate_none_streams(monkeypatch):

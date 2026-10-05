@@ -63,6 +63,26 @@ def test_guide_mentions_every_command_and_langs():
     assert {d["name"] for d in docs} >= {"version", "help", "guide", "doctor"}
 
 
+def test_guide_renders_subcommands_and_arguments():
+    # collector upgrade: group subcommands surface as second-level entries and
+    # required Arguments render as <NAME> instead of phantom flag rows
+    # (Codex DX fold).  server/chat land with their own tasks; config's
+    # subcommands and model-info pin the rendering here.
+    text = invoke("guide", "--lang", "en").output
+    assert "  ipo config get <KEY> [--json]" in text
+    assert "  ipo config set <KEY> <VALUE>" in text
+    assert "ipo model-info <NAME> [--json]" in text
+    markdown = invoke("guide", "--format", "markdown").output
+    assert "### config get" in markdown
+    assert "`<NAME>`: required argument" in markdown
+    docs = json.loads(invoke("guide", "--format", "json").output)
+    model_info_doc = next(d for d in docs if d["name"] == "model-info")
+    assert model_info_doc["arguments"] == [{"name": "NAME", "required": True}]
+    config_doc = next(d for d in docs if d["name"] == "config")
+    # subset form: later tasks add more subcommands and must not break this
+    assert {"path", "get", "set", "list"} <= {sub["name"] for sub in config_doc["commands"]}
+
+
 def test_guide_lang_defaults_from_ui_lang_config(monkeypatch, tmp_path):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("IPO_UI_LANG", "en")
