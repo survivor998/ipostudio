@@ -131,9 +131,9 @@
 - **Depends on:** 无
 
 ## TODO-015: 引擎日志轮转与多实例日志名（P3 前）
-- **What:** `logs/engine-llama-cpp.log` 无轮转；多实例落地时按实例命名并在 `ipo logs` 聚合。
-- **Why:** TODO-004 的引擎侧延伸；单文件单写者安全但会无限增长。
-- **Context:** 核心回路计划引入第一个长驻子进程时的既知限制（supervisor 模块注释）。
+- **What:** `logs/engine-llama-cpp.log` 无轮转；多实例落地时按实例命名并在 `ipo logs` 聚合。phase-4 增补两个同文件面：① 读路径——`server logs --lines` 与 supervisor 失败详情的 `_tail` 都是整文件读入再取尾部，轮转之外读路径也需 O(tail) 化（反向字节定位）；② 墙钟时间戳——phase-4 证实引擎二进制支持 `--log-timestamps`（实测 `llama-server --help`），是否随 argv 传入属本项决策面。
+- **Why:** TODO-004 的引擎侧延伸；单文件单写者安全但会无限增长，增长同时拖慢上述两个整读面。
+- **Context:** 核心回路计划引入第一个长驻子进程时的既知限制（supervisor 模块注释）；phase-1 曾把"引擎日志只有 uptime 时间戳"记为上游 QUIRK（Q2），phase-4 以 `--help` 证伪"不可得"——是 argv 未传而非引擎不支持。
 - **Effort:** human: S / CC: S
 - **Priority:** P2（优先级），时序 P3 前
 - **Depends on:** TODO-004
@@ -200,9 +200,29 @@
 - **Depends on:** P2 模型管理（文档面共用）
 
 ## TODO-024: 监听地址与连接地址分离（P3 前）
-- **What:** `server_host` 为 `0.0.0.0` 等通配地址时，健康探测/聊天请求/展示直接复用监听地址；按地址族推导可连接地址（回环优先）并统一 IPv6 URL 括号（Codex ENG 折叠；`choose_port` 的 IPv6 绑定面已随本计划交付）。
+- **What:** `server_host` 为 `0.0.0.0` 等通配地址时，健康探测/聊天请求/展示直接复用监听地址；按地址族推导可连接地址（回环优先）并统一 IPv6 URL 括号（Codex ENG 折叠；`choose_port` 的 IPv6 绑定面已随本计划交付）。phase-4 增补：健康/身份探测与 `ipo chat` 已按 `_probe_host` 把通配地址翻译为各自回环（ba4e590 修复 + phase-4 的 `::`→`::1` 与 chat 侧补齐），本项余下的是展示面（`http://0.0.0.0:port` 对用户无操作意义）与非通配非回环地址的可达性推导。
 - **Why:** 通配监听在部分栈上可连、部分栈上不可连；`http://0.0.0.0:port` 的展示对用户无操作意义。
 - **Context:** 核心回路计划 Codex 网络地址折叠；多实例/远程面（P3/P4）前完成。
+- **Effort:** human: S / CC: S
+- **Priority:** P3
+- **Depends on:** 无
+
+## TODO-025: 模型目录热路径按需重扫（读面缓存）
+- **What:** `ipo model --select`、`ipo model-info` 与每次 `_resolve_model`（start / 两种 restart 前置）都执行完整目录重扫+upsert（`models_cmd._refresh`）；`ipo server restart` 因 precheck 与 start 各走一次 `_resolve_model` 实际全扫两遍。改为：扫根 (mtime, size) 指纹未变时读面复用 catalog（O(stat) 快路径），提供显式全扫逃生门（`ipo models` 即全扫，或 `--refresh`），start/restart 的 precheck 与启动解析共享同一次扫描结果。
+- **Why:** 2026-10-05 phase-4 QA 分析（代码走查）：每次选择/查看一个模型都要为整个 catalog 付一次有界全扫（MAX_SCAN_VISITED=20000 条目、深 4 层、逐候选 GGUF magic 读头），冷盘/杀软扫描下延迟随目录规模线性放大；restart 双扫是纯浪费。业界惯例即 stat 指纹快路径 + 强制刷新逃生门（uv 的激进 CLI 缓存：https://docs.astral.sh/uv/ ；Nextcloud `occ files:scan` 的显式全扫模式：https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/occ_command.html ）。
+- **Pros:** 读面从 O(全目录遍历) 降为 O(根 stat)；start/restart 少一次全扫。
+- **Cons:** 缓存失效语义多一个面（mtime 粒度/时钟偏移可误判——现有 `_resolve_model` 的文件存在性+分片族复核恰好是兜底层，必须保留）；与 TODO-021 剪枝同表交互，宜一并设计。
+- **Context:** ENG F10 把 `_refresh` 收敛为单助手（正确性收益成立）；本项只谈效率面，不动"silence is never free"的扫描计数契约。
+- **Effort:** human: M / CC: M
+- **Priority:** P3
+- **Depends on:** 无；宜与 TODO-021（剪枝）同期设计
+
+## TODO-026: completion 记录的截断元数据保真
+- **What:** `record_completion` 把 prompt/output 截到 2000 字符存储，但 `prompt_chars`/`output_chars` 仍记录完整长度——超过 2000 字符的交换会产生"计数 3000、内容 2000"的自相矛盾记录。决策并实现：截断发生时让计数反映存储内容，或加显式 `truncated` 标记并在 `server info` 呈现"已截断"。
+- **Why:** 2026-10-05 phase-4 QA 分析发现：chars 元数据语义随存储截断静默漂移；未来 GUI 历史列表/导出按 chars 计算展示或分页会失真。现有测试只钉了"存 2000"（`test_record_completion_redacts_and_truncates_at_2000`），未钉计数语义。
+- **Pros:** 记录自洽，消费方无需猜测。
+- **Cons:** 计数语义变更对既有 `--json` 消费者是契约面（需 CHANGELOG 注明）；2000 截断本身是已交付决策（Codex trust fold），本项只补一致性。
+- **Context:** 2026-10-05 phase-4 QA 分析；与 TODO-023（保留策略）同表但正交——023 管"存多久/能否删"，本项管"存下来的记录自不自洽"。
 - **Effort:** human: S / CC: S
 - **Priority:** P3
 - **Depends on:** 无
