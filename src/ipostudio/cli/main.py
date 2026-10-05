@@ -748,3 +748,7 @@ cli.add_command(start)
 cli.add_command(status)
 cli.add_command(stop)
 cli.add_command(restart)
+
+from ipostudio.cli.chat_cmd import chat
+
+cli.add_command(chat)
