@@ -463,6 +463,12 @@ def restart(model_name: str | None, timeout_s: float) -> None:
         engine_path, problem = resolve_engine(cfg.engines.llama_cpp_path)
         if engine_path is None:
             _fail(problem)
+        # resolve-only model precheck through the same disk-aware path
+        # `ipo server restart` uses: with the insert-only catalog a moved or
+        # deleted model file must fail here — before a healthy server is
+        # stopped — never as a start failure after the stop.  The selection
+        # is not persisted until the precheck below has passed.
+        _resolve_model(conn, cfg, model_name)
         if model_name is not None:
             try:
                 activate_model(conn, model_name, cfg)

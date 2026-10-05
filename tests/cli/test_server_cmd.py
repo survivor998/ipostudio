@@ -228,3 +228,27 @@ def test_stop_and_restart_shorthands(service_env, monkeypatch):
     stopped = _invoke("stop")
     assert stopped.exit_code == 0
     assert "stopped" in stopped.output
+
+def test_restart_precheck_never_stops_a_healthy_server(service_env, monkeypatch):
+    _patch_fake_engine(monkeypatch)
+    assert _invoke("model", "--select", "tiny-q4").exit_code == 0
+    assert _invoke("start", "--timeout", "20").exit_code == 0
+    try:
+        # a typo'd name must refuse without touching the running instance
+        typo = _invoke("restart", "--model", "nope")
+        assert typo.exit_code == 1
+        assert "nope" in typo.stderr
+        # disk problems must surface pre-stop too: the insert-only catalog
+        # keeps the stale row, so only the file check can catch a deletion
+        (service_env / "models" / "tiny-q4.gguf").unlink()
+        named = _invoke("restart", "--model", "tiny-q4")
+        assert named.exit_code == 1
+        assert "no longer exists" in named.stderr
+        bare = _invoke("restart")
+        assert bare.exit_code == 1
+        assert "no longer exists" in bare.stderr
+        rows = json.loads(_invoke("server", "list", "--json").output)
+        assert rows["instances"][0]["state"] == "running"
+        assert "running" in _invoke("status").output
+    finally:
+        _invoke("stop")
