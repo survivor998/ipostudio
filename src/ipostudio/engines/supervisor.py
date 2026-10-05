@@ -168,7 +168,8 @@ def start_instance(
     try:
         log_handle = log_path.open("ab")
     except OSError as exc:
-        _fail_row(conn, instance_id, f"cannot open engine log {log_path}: {exc}")
+        _fail_row(conn, instance_id, f"cannot open engine log {log_path}: {exc}",
+                  expect=("starting", "loading"))
         return outcome(False)
     try:
         try:
@@ -179,7 +180,8 @@ def start_instance(
                 stderr=log_handle,
             )
         except OSError as exc:
-            _fail_row(conn, instance_id, f"cannot start engine {argv[0]}: {exc}")
+            _fail_row(conn, instance_id, f"cannot start engine {argv[0]}: {exc}",
+                      expect=("starting", "loading"))
             return outcome(False)
         _touch(conn, instance_id, pid=proc.pid)
         deadline = time.monotonic() + timeout_s
@@ -191,6 +193,7 @@ def start_instance(
                         conn, instance_id,
                         f"engine exited during startup with code {proc.returncode}; "
                         f"last log lines: {_tail(log_path)}",
+                        expect=("starting", "loading"),
                     )
                     return outcome(False)
                 health = probe(host, port, 1.5)

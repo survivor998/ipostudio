@@ -147,6 +147,27 @@ def test_start_instance_spawn_failure_marks_failed(tmp_path):
     assert "cannot start engine" in outcome.instance["detail"]
     conn.close()
 
+def test_start_fail_write_loses_race_to_concurrent_stop(tmp_path):
+    # Fail-writes are expect-guarded: a concurrent stop that already retired
+    # the row to `stopped` must win, and the startup's failure write must
+    # neither flip it to `failed` nor resurrect it.  The stop is injected
+    # inside `spawn` so the row is deterministically `stopped` when the
+    # failure path fires (state-machine pre-seeding, not sleep timing).
+    conn = _db(tmp_path)
+
+    def retiring_spawn(*args, **kwargs):
+        stop_instance(conn, identify=lambda *a, **k: "absent")
+        raise FileNotFoundError("missing engine")
+
+    kwargs = _spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "down")
+    kwargs["spawn"] = retiring_spawn
+    outcome = start_instance(conn, ["missing-engine"], **kwargs)
+    assert outcome.ok is False
+    row = get_instance(conn, outcome.instance["id"])
+    assert row["state"] == "stopped"  # the concurrent stop stays retired
+    assert row["detail"] == ""  # the lost fail-write left the row untouched
+    conn.close()
+
 def test_start_instance_with_real_fake_engine_end_to_end(tmp_path):
     conn = _db(tmp_path)
     port = choose_port("127.0.0.1", 18300)
