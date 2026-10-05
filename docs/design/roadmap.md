@@ -20,6 +20,34 @@
 **P1 完成后立即执行 P1.5 垂直切片**（原为 P2 入口条件，经用户批准前移为正式子项目）：
 安装 llama.cpp → 下载一个小型 GGUF（一次性脚本，非 P2 完整下载器）→ 完成一次补全 → 落日志与 SQLite 记录 → 重启后记录仍在。限时（建议 ≤2 天人工等效）；切片结论回写本文件——若切片失败，先修路线图再继续 P2。
 
+```text
+# Manual real-model smoke (one-time gate for the M0' writeback):
+# 1. install llama.cpp, put llama-server on PATH (README quickstart)
+# 2. drop any small .gguf into ~/.ipostudio/models
+#    (record the download time — the writeback separates it from TTHW)
+ipo doctor --fix
+ipo models            # the real GGUF appears
+ipo model --select <name>
+ipo server start      # real engine loads the real weights
+ipo chat "hello"      # a real answer comes back
+#    -> record time-to-first-answer separately (TTHW evidence, Codex fold)
+ipo server info       # record shows the exchange
+ipo server stop
+```
+
+**切片结论（2026-10-05 回写）**：M0′ 以产品命令形态交付（核心回路计划
+`docs/superpowers/plans/2026-10-05-core-value-loop.md`）：`ipo models` 扫描
+→ `ipo model --select` 激活 → `ipo server start`（llama.cpp，SQLite 实例行
++ 五态状态机）→ `ipo chat` 一次补全（OpenAI 兼容端点，交换内容入库）→
+重启经 `ipo server info` 可查。与原案差异：装引擎/下模型保持手动（下载器
+按 ADR-005 完整留给 P2；引擎自动安装非任何阶段承诺）。验证分层：全部 8
+任务以假引擎子进程替身自动化验证（架构 §5）；真机小模型冒烟按上方清单
+执行——待用户执行，它是 P2 入口条件的最终标准。
+竞争检查点（CEO 评审 #6）：本地"下载→运行→对话"层存在成熟免费在位者
+（Ollama/LM Studio）；本项目的差异化在楔子功能（docparse+知识库/多引擎
+统一网关/跨工具记忆）。触发器：若在位者接管本层全部用户价值且楔子层无
+法建立差异化，P2/P3 的本地运行层投入需重新裁决。
+
 ## 里程碑 M0：完整最小闭环（P4 完成即验收）
 
 下载模型 → 引擎实例 → **经网关**完成一次对话 → 持久化记录 → 重启可查。M0 之前的一切质量打磨以此为债务上限（超出 M0 路径的精良实现记入 TODOS 押后）。

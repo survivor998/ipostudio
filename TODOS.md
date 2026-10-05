@@ -121,3 +121,88 @@
 - **Effort:** human: M / CC: S
 - **Priority:** P3
 - **Depends on:** CLI UX 计划落地；宜在 TODO-001（补全）同期
+
+## TODO-014: doctor 增加第五项 engine/models 检查
+- **What:** doctor 增加 `engine` 检查（发现 llama-server、统计目录内模型数），JSON 契约从四项扩为五项。
+- **Why:** 缺引擎/缺模型的引导目前只在 `ipo models` 空态与 `ipo server start` 错误里；doctor 作为体检入口应覆盖。
+- **Context:** 核心回路计划范围裁决 #4：本计划不动 doctor 四项契约。
+- **Effort:** human: S / CC: S
+- **Priority:** P3
+- **Depends on:** 无
+
+## TODO-015: 引擎日志轮转与多实例日志名（P3 前）
+- **What:** `logs/engine-llama-cpp.log` 无轮转；多实例落地时按实例命名并在 `ipo logs` 聚合。
+- **Why:** TODO-004 的引擎侧延伸；单文件单写者安全但会无限增长。
+- **Context:** 核心回路计划引入第一个长驻子进程时的既知限制（supervisor 模块注释）。
+- **Effort:** human: S / CC: S
+- **Priority:** P2（优先级），时序 P3 前
+- **Depends on:** TODO-004
+
+## TODO-016: stop 的 PID 级身份加固（P3 前）
+- **What:** 文档级身份证明已在本计划交付（`probe_identity` /props 模型守卫：owned 才发信号、foreign 拒绝并如实留行、absent 不发信号——Codex 三声部折叠，替代旧"端口健康应答即放行"启发式）。余下为 PID 级加固：记录引擎进程启动时刻/create_time 并比对，覆盖"记录 PID 被回收而端口仍服务本模型"的残余窗口。
+- **Why:** /props 守卫把误杀面从"任何 200/503 应答"收窄到"端口上确是本模型"，但 PID 与端口文档的绑定仍是间接推断；PID 重用窗口内的 kill 仍是用户机器信任问题。
+- **Context:** 核心回路计划范围裁决 #6 + Codex 停止安全折叠；跨平台进程身份探需无分支实现设计。
+- **Effort:** human: M / CC: M
+- **Priority:** P2（优先级），时序 P3 前
+- **Depends on:** 无
+
+## TODO-019: 竞争转向触发器与楔子 MVP 排位（下一计划入口）
+- **What:** 为"本地运行层"（下载/运行/对话的商品层）写明竞争转向判据；把 CEO 评审 #6 的楔子 MVP 建议（docparse+知识库 / 多引擎网关 / 跨工具记忆 三选一先做）列为下一轮路线图排位的必答题。**判据具体化（Codex CEO 折叠）：** 旧触发条件"在位者接管全部用户价值"几乎不可操作——下一轮基础设施投入前必须选定一个楔子方向并写明试用入口、替换对象、成功指标与停止日期；选定前商品层不再吸收结构性投入。
+- **Why:** 本层存在成熟免费在位者（Ollama/LM Studio）；产品差异化在楔子层。无触发器时后续计划可能继续在商品层加码（CEO 评审 #6）。
+- **Context:** roadmap M0′ 回写已含触发器文本（核心回路计划 Task 8）；下一计划排位时由 CEO 双声部裁决。
+- **Effort:** human: S / CC: S
+- **Priority:** P2
+- **Depends on:** 下一轮路线图排位
+
+## TODO-017: 常驻后台服务与 detach（P3）
+- **What:** `ipo server start` 目前孤儿进程 + 三平台对称的"关终端即停"限制；P3 引入按需后台服务进程（ADR-004 完整形态）。
+- **Why:** 服务生命周期与终端解耦是多实例/空闲卸载的前提。
+- **Context:** 核心回路计划范围裁决 #5；R1 禁平台分支，detach 方案须跨平台设计（服务进程 + 轻客户端）。
+- **Effort:** human: L / CC: M
+- **Priority:** P3
+- **Depends on:** P3 引擎监管
+
+## TODO-018: chat 流式输出与 NDJSON 事件（P6）
+- **What:** `ipo chat` 增加流式渲染与 `--json` NDJSON 事件（start/event/chunk/result，§9.11）。
+- **Why:** 规格授权的 CLI 对话完整形态；非流式切片已把记录面打通。
+- **Context:** 核心回路计划范围裁决 #3；事件契约与 agent run（P7）共用设计。
+- **Effort:** human: M / CC: S
+- **Priority:** P6
+- **Depends on:** P6 对话
+
+## TODO-021: 模型目录剪枝（P2）
+- **What:** `ipo models`/扫描时与文件系统对账：消失的文件从 models 表移除或标记 missing；P2 下载器落地时并入完整生命周期。本计划已交付：`_resolve_model` 的存在性+分片族完整性复核（启动前）、列表 `(missing)` 标注；本项补移除/清理，并把 **path-addressable 激活**（同名不同目录时按路径激活，Codex DX 死循环折叠的根治）随本项一并设计。
+- **Why:** 目录是 insert-only（ENG Finding 3），已删模型靠启动前复核兜底；同名歧义在 ENG F2 下被拒绝且 P2 前无解，需与剪枝同设计。
+- **Context:** 核心回路计划 ENG 评审 F3；P2 模型管理的主责面。
+- **Effort:** human: S / CC: S
+- **Priority:** P2
+- **Depends on:** P2 模型管理
+
+## TODO-022: start 的检查-生成序列化（P2 多入口前）
+- **What:** `ipo server start` 的 active-instance 检查与 INSERT 分处两个 autocommit 步骤，两个并发 **CLI 进程** start 可各自生成引擎；用 `BEGIN IMMEDIATE` 事务（migrate() 先例）或 ConfigStore 式咨询锁把"检查+登记"包成单序列化段。本计划已交付**进程内**一半（Codex ENG 竞态折叠）：`_touch(expect=...)` 条件状态转换 + stop 条件写 + 败者 terminate，start/stop 交错已有测试；跨进程双 start 仍在。
+- **Why:** 进程内交错已闭环；跨进程窗口内仍可出现两行 running 与一个孤儿引擎。
+- **Context:** 核心回路计划 ENG 评审；P2 GUI/嵌入方进程内调用落地前完成。
+- **Effort:** human: S / CC: S
+- **Priority:** P2（优先级），时序 P2 落地前
+- **Depends on:** 无
+
+## TODO-020: --json 输出方言收敛（P7 前）
+- **What:** 列表型 `--json` 现为 pretty 单文档（与 version/doctor/config 一致）；§9.11 的 NDJSON 事件方言（start/event/chunk/result）属 agent run/chat 流式场景。P7 设计事件流时明确两方言边界并写入门面文档。
+- **Why:** 防止 P6/P7 事件流与既有列表方言冲突（CEO 评审 #7）。
+- **Depends on:** P6/P7
+
+## TODO-023: 会话记录保留策略与删除工具（P2）
+- **What:** `completions` 表默认保存（已脱敏的）交换内容且无删除入口；P2 提供 `chat --no-save` 与记录清除命令（或等价面），README 写明保留策略（Codex CEO/DX/ENG 三声部信任折叠）。
+- **Why:** 本地单机存储风险有限，但"默认永久保存用户提示"应有明示出口；脱敏已在持久化边界交付，本项补控制面。
+- **Context:** 核心回路计划 Codex 信任折叠；与 P2 模型管理的隐私文档共用一节。
+- **Effort:** human: S / CC: S
+- **Priority:** P2
+- **Depends on:** P2 模型管理（文档面共用）
+
+## TODO-024: 监听地址与连接地址分离（P3 前）
+- **What:** `server_host` 为 `0.0.0.0` 等通配地址时，健康探测/聊天请求/展示直接复用监听地址；按地址族推导可连接地址（回环优先）并统一 IPv6 URL 括号（Codex ENG 折叠；`choose_port` 的 IPv6 绑定面已随本计划交付）。
+- **Why:** 通配监听在部分栈上可连、部分栈上不可连；`http://0.0.0.0:port` 的展示对用户无操作意义。
+- **Context:** 核心回路计划 Codex 网络地址折叠；多实例/远程面（P3/P4）前完成。
+- **Effort:** human: S / CC: S
+- **Priority:** P3
+- **Depends on:** 无
