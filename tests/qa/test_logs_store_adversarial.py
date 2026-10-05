@@ -305,17 +305,24 @@ def test_migrate_concurrent_subprocesses_single_registration(tmp_path):
     # exits nonzero with a rolled-back MigrationFailure.  Accept that recorded
     # variant; the post-state invariant below stays strict.
     for returncode, err in ((procs[0].returncode, err1), (procs[1].returncode, err2)):
-        assert returncode == 0 or "migration 001_init.sql failed" in err, err
+        # either migration can be the one the TOCTOU loser was racing on
+        assert (
+            returncode == 0
+            or "migration 001_init.sql failed" in err
+            or "migration 002_models.sql failed" in err
+        ), err
     assert "Traceback" not in err1 and "Traceback" not in err2
     applied = sorted(
         ast.literal_eval(out.strip()) for out, rc, err in
         ((out1, procs[0].returncode, err1), (out2, procs[1].returncode, err2))
         if rc == 0
     )
-    assert applied == [[], ["001_init.sql"]], "exactly one process applies the migration"
+    assert applied == [[], ["001_init.sql", "002_models.sql"]], (
+        "exactly one process applies the migrations"
+    )
     conn = open_db(db)
     rows = conn.execute("SELECT name FROM _migrations ORDER BY id").fetchall()
-    assert [r["name"] for r in rows] == ["001_init.sql"]
+    assert [r["name"] for r in rows] == ["001_init.sql", "002_models.sql"]
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='app_meta'").fetchone()[0] == 1
     conn.close()
 

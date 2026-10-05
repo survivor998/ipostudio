@@ -16,11 +16,11 @@ def test_migrate_is_idempotent_and_records_names(tmp_path):
     conn = open_db(tmp_path / "app.db")
     applied_first = migrate(conn)
     applied_second = migrate(conn)
-    assert applied_first == ["001_init.sql"]  # migration identity = package filename
+    assert applied_first == ["001_init.sql", "002_models.sql"]  # identity = package filename
     assert applied_second == []
-    assert current_version(conn) == 1
+    assert current_version(conn) == 2
     names = [row["name"] for row in conn.execute("SELECT name FROM _migrations ORDER BY id")]
-    assert names == ["001_init.sql"]
+    assert names == ["001_init.sql", "002_models.sql"]
     # app_meta usable
     conn.execute("INSERT OR REPLACE INTO app_meta(key, value) VALUES ('probe', '1')")
     conn.commit()
