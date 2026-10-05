@@ -148,7 +148,9 @@ def test_doctor_fix_migrates_existing_outdated_database(tmp_path, monkeypatch):
     conn = sq.connect(db)
     names = [r[0] for r in conn.execute("SELECT name FROM _migrations")]
     conn.close()
-    assert names == ["001_init.sql", "002_models.sql"]  # existing DB was migrated, not skipped
+    assert names == [  # existing DB was migrated, not skipped
+        "001_init.sql", "002_models.sql", "003_instances.sql",
+    ]
 
 
 def test_doctor_fails_nonzero_on_bad_config(tmp_path, monkeypatch):

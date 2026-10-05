@@ -305,11 +305,12 @@ def test_migrate_concurrent_subprocesses_single_registration(tmp_path):
     # exits nonzero with a rolled-back MigrationFailure.  Accept that recorded
     # variant; the post-state invariant below stays strict.
     for returncode, err in ((procs[0].returncode, err1), (procs[1].returncode, err2)):
-        # either migration can be the one the TOCTOU loser was racing on
+        # any migration can be the one the TOCTOU loser was racing on
         assert (
             returncode == 0
             or "migration 001_init.sql failed" in err
             or "migration 002_models.sql failed" in err
+            or "migration 003_instances.sql failed" in err
         ), err
     assert "Traceback" not in err1 and "Traceback" not in err2
     applied = sorted(
@@ -317,16 +318,19 @@ def test_migrate_concurrent_subprocesses_single_registration(tmp_path):
         ((out1, procs[0].returncode, err1), (out2, procs[1].returncode, err2))
         if rc == 0
     )
-    assert applied in (
-        # one process wins both apply races before the other re-checks
-        [[], ["001_init.sql", "002_models.sql"]],
-        # each migration applies in its own transaction: the 001 loser passes
-        # its re-check (already registered) and can still win the 002 apply
-        [["001_init.sql"], ["002_models.sql"]],
-    ), f"each migration must be applied exactly once across processes, got: {applied}"
+    # 003 makes per-migration wins combinatorial (either process can win any
+    # of the three apply races), so assert the invariant the two-migration
+    # enumeration expressed: across processes, each migration applies
+    # exactly once.
+    flat = [name for entry in applied for name in entry]
+    assert sorted(flat) == [
+        "001_init.sql", "002_models.sql", "003_instances.sql",
+    ], f"each migration must be applied exactly once across processes, got: {applied}"
     conn = open_db(db)
     rows = conn.execute("SELECT name FROM _migrations ORDER BY id").fetchall()
-    assert [r["name"] for r in rows] == ["001_init.sql", "002_models.sql"]
+    assert [r["name"] for r in rows] == [
+        "001_init.sql", "002_models.sql", "003_instances.sql",
+    ]
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='app_meta'").fetchone()[0] == 1
     conn.close()
 
