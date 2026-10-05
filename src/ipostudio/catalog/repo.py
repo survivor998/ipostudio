@@ -46,6 +46,18 @@ def find_model(conn: sqlite3.Connection, ident: str) -> list[dict]:
     if exact_name:
         return exact_name
     exact_path = query("path = ?", ident)
+    if not exact_path:
+        # separator-normalized exact path: a user can type the SAME stored
+        # path with forward slashes (shells, configs, copy-paste), and the
+        # byte-exact SQL arm above must not turn that into a false "no local
+        # model matches".  Both sides go through as_posix() (R1-clean
+        # normalization; os.path is out of bounds in src/).
+        normalized = ident.replace("\\", "/").strip("/")
+        if normalized:
+            exact_path = [
+                row for row in list_models(conn)
+                if Path(row["path"]).as_posix() == normalized
+            ]
     if exact_path:
         return exact_path
     # Component-aware suffix match, computed in Python: user-supplied % and _

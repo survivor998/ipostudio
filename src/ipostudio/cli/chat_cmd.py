@@ -2,6 +2,7 @@
 conversation, non-streaming slice).  Every attempt lands a completions row so
 the M0' slice requirement (records survive restarts) holds for failures too."""
 
+import math
 import time
 
 import click
@@ -28,6 +29,12 @@ def chat(prompt: str, timeout_s: float) -> None:
         prompt = sys.stdin.read()
     if not prompt.strip():
         _fail("empty prompt")
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        # same contract as `_run_start` (server_cmd): argument validation
+        # must precede any catalog/state access, or a bad --timeout would be
+        # misreported as "no server is running" and inf would hang against
+        # a live engine (chat_completion re-checks as defense in depth)
+        _fail("--timeout must be a finite positive number of seconds")
     conn, cfg = open_config_and_db()
     try:
         instance = active_instance(conn)

@@ -3,6 +3,7 @@
 Non-streaming by design — streaming arrives with the conversation plan."""
 
 import json
+import math
 import urllib.error
 import urllib.request
 
@@ -24,6 +25,15 @@ def chat_completion(
     repeat_penalty: float,
     timeout_s: float,
 ) -> dict:
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        # socket.settimeout rejects negatives/NaN with ValueError and inf
+        # with OverflowError (time_t on Windows); inf is not a "no timeout"
+        # sentinel anyway (None is) — the caller deserves the real diagnosis,
+        # not a socket-internal crash or a hang (phase-3 targeted finding)
+        raise ChatError(
+            f"timeout must be a finite positive number of seconds, "
+            f"got {timeout_s!r}"
+        )
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],

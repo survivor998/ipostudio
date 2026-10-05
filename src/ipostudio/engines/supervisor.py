@@ -48,12 +48,22 @@ def _now() -> str:
     # mixes "2026-10-05 08:00:00" and ISO "2026-10-05T08:00:00+00:00"
     return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
+def _probe_host(host: str) -> str:
+    """The connect target for probing a bound address.  The unspecified
+    address is a bind wildcard, never a destination: Windows refuses a
+    connect to 0.0.0.0 outright (WSAEADDRNOTAVAIL class) where POSIX happens
+    to route it to loopback — so the documented-supported `--host 0.0.0.0`
+    start could never finish its own health check there.  Binding, argv and
+    the instance row keep the configured host; only the probe connects."""
+    return "127.0.0.1" if host in ("0.0.0.0", "::") else host
+
 def probe_health(host: str, port: int, timeout_s: float) -> str:
     """'ok' | 'loading' | 'down'.  llama-server answers 503 while the model
     loads and 200 once ready (documented engine behaviour)."""
     import urllib.error
     import urllib.request
 
+    host = _probe_host(host)
     host_part = f"[{host}]" if ":" in host else host
     try:
         with urllib.request.urlopen(
@@ -168,8 +178,12 @@ def start_instance(
     def outcome(ok: bool) -> StartOutcome:
         return StartOutcome(_get(conn, instance_id), ok)
 
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # the mkdir is inside the guard on purpose: a blocked log location
+        # (a file where the logs directory belongs, or a permission error)
+        # raises from mkdir itself, and this failed-row contract — not a raw
+        # traceback — is the user-facing failure (phase-3 targeted finding)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = log_path.open("ab")
     except OSError as exc:
         logger.warning("server start failed: cannot open engine log %s: %s",
@@ -290,6 +304,7 @@ def probe_identity(
     import urllib.error
     import urllib.request
 
+    host = _probe_host(host)
     host_part = f"[{host}]" if ":" in host else host
     try:
         with urllib.request.urlopen(
