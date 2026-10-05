@@ -11,6 +11,7 @@ Known M0' limitation, symmetric on all three platforms: closing the terminal
 that started the server may take the engine down with it; the durable
 background service is P3 scope (ADR-004)."""
 
+import json
 import os
 import signal
 import socket
@@ -238,6 +239,23 @@ def start_instance(
     finally:
         log_handle.close()
 
+def _document_names_model(node: object, model_path: str) -> bool:
+    """True when the model path appears inside any string value of the
+    decoded /props document.  Matching DECODED strings — never the raw body
+    text — is the cross-platform form: JSON escapes the backslashes of
+    Windows paths, so a raw-substring check classified every owned Windows
+    port as foreign and `ipo server stop` could never stop the engine it
+    started (R1; found by the Task 5 end-to-end suite)."""
+    if isinstance(node, str):
+        return model_path in node
+    if isinstance(node, dict):
+        return any(
+            _document_names_model(value, model_path) for value in node.values()
+        )
+    if isinstance(node, list):
+        return any(_document_names_model(item, model_path) for item in node)
+    return False
+
 def probe_identity(
     host: str, port: int, model_path: str, timeout_s: float
 ) -> str:
@@ -260,7 +278,11 @@ def probe_identity(
         return "absent"
     except OSError:
         return "absent"
-    return "owned" if model_path in body else "foreign"
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return "foreign"  # not a props document: ownership stays unproven
+    return "owned" if _document_names_model(document, model_path) else "foreign"
 
 def stop_instance(
     conn: sqlite3.Connection,

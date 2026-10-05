@@ -240,6 +240,41 @@ def test_stop_signals_once_identity_confirms(tmp_path, monkeypatch):
     assert kills == [signal.SIGTERM]
     conn.close()
 
+def test_probe_identity_matches_escaped_windows_paths():
+    # regression (Task 5 e2e finding): the /props body JSON-escapes the
+    # backslashes of Windows paths, so matching the RAW body text classified
+    # every owned Windows port as foreign and stop could never kill the
+    # engine it started.  The check must see the DECODED document — on every
+    # platform (R1), hence this deterministic loopback fixture.
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    win_path = "C:\\models\\tiny-q4.gguf"
+    body = json.dumps({"model_path": win_path}).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as httpd:
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = httpd.server_address
+            assert supervisor.probe_identity(host, port, win_path, 2.0) == "owned"
+            assert supervisor.probe_identity(host, port, "C:\\other.gguf", 2.0) == "foreign"
+        finally:
+            httpd.shutdown()
+        thread.join(timeout=5)
+
 def test_concurrent_stop_cancels_start(tmp_path, monkeypatch):
     conn = _db(tmp_path)
     kills = []
