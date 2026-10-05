@@ -288,6 +288,7 @@ ROUNDTRIP_VALUES: dict[str, object] = {
     "server_load_mode": "gpu",
     "server_flash_attn": "on",
     # engines
+    "llama_cpp_path": "engines/llama-server",
     "llama_cpp_extra_args": ["--n-gpu-layers", "16"],
     "vllm_extra_args": ["--max-model-len", "4096"],
     "sglang_extra_args": ["--chunked-prefill-size", "512"],
@@ -324,10 +325,10 @@ ROUNDTRIP_VALUES: dict[str, object] = {
 
 
 def test_flat_keys_full_roundtrip_preserves_values_and_types(tmp_path):
-    """Set every settable FLAT_KEYS entry (60 - 3 credentials = 57), save,
+    """Set every settable FLAT_KEYS entry (61 - 3 credentials = 58), save,
     reload into a fresh store, and compare the whole config for equality —
     catches coercion drift on floats, bools, Nones and lists."""
-    assert len(FLAT_KEYS) == 60
+    assert len(FLAT_KEYS) == 61
     assert len(ROUNDTRIP_VALUES) == len(FLAT_KEYS) - len(CREDENTIAL_KEYS)
     assert not (set(ROUNDTRIP_VALUES) & CREDENTIAL_KEYS)
 
@@ -456,7 +457,8 @@ def test_crashed_save_leaves_tmp_that_next_load_and_save_ignore(tmp_path):
     store.save()  # must not be confused by the foreign tmp file
 
     data = tomllib.loads(cfg.read_text(encoding="utf-8"))
-    assert data == {"server_host": "survivor", "server_port": 12346}
+    # save() stamps its schema version on every file it writes (downgrade fold)
+    assert data == {"server_host": "survivor", "server_port": 12346, "config_version": 1}
     # save leaves no NEW temps behind (its own was renamed into place);
     # the crashed one is untouched by the loader
     leftovers = sorted(p.name for p in tmp_path.glob(".settings-*.tmp"))

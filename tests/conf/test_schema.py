@@ -31,6 +31,7 @@ SPEC_DEFAULTS = {
     ("tuning", "server_fallback_models"): [],
     ("tuning", "server_load_mode"): "auto",
     ("tuning", "server_flash_attn"): "auto",
+    ("engines", "llama_cpp_path"): "",
     ("embedding", "embedding_port"): 18190,
     ("embedding", "embedding_pooling"): "last",
     ("gateway", "gateway_enabled"): True,

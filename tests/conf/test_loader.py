@@ -407,6 +407,20 @@ def test_file_key_names_reports_explicit_keys(tmp_path):
     assert file_key_names(tmp_path / "missing.toml") == set()
 
 
+def test_save_stamps_config_version_for_downgrade_tolerance(tmp_path, monkeypatch):
+    import tomllib
+
+    from ipostudio.conf.loader import ConfigStore
+    from ipostudio.conf.paths import resolve_config_path
+
+    monkeypatch.setenv("IPO_CONFIG", str(tmp_path / "settings.toml"))
+    store = ConfigStore(resolve_config_path(), load_config())
+    store.set("server_port", 18765)
+    store.save()
+    raw = tomllib.loads(resolve_config_path().read_text(encoding="utf-8"))
+    assert raw["config_version"] == loader._SCHEMA_CONFIG_VERSION  # Codex fold
+
+
 def test_save_reports_unwritable_parent_as_config_error(tmp_path, monkeypatch):
     # mkdir failure must surface through the error contract, not a raw OSError
     from ipostudio.conf.loader import ConfigStore

@@ -380,6 +380,20 @@ class ConfigStore:
                         merged.pop(key, None)
                     else:
                         merged[key] = value
+                # Stamp the writing schema version: after a downgrade the
+                # older build reads a HIGHER file version and drops
+                # unknown keys with a warning, instead of rejecting a
+                # config this build itself wrote.  A marker written by an
+                # even newer build is never lowered: resetting it here
+                # while the newer keys it protects stay in the file would
+                # make the next load fatal again — the exact brick this
+                # stamp exists to prevent.
+                file_marker = merged.get("config_version")
+                if not (
+                    isinstance(file_marker, (int, float))
+                    and file_marker > _SCHEMA_CONFIG_VERSION
+                ):
+                    merged["config_version"] = _SCHEMA_CONFIG_VERSION
                 fd, temp_name = _mkstemp_in(self.path.parent)
                 try:
                     with os.fdopen(fd, "wb") as handle:

@@ -58,6 +58,7 @@ class ServerTuning(_Strict):
 
 
 class EngineExtras(_Strict):
+    llama_cpp_path: str = ""  # empty: resolve `llama-server` from PATH
     llama_cpp_extra_args: list[str] = Field(default_factory=list)
     vllm_extra_args: list[str] = Field(default_factory=list)
     sglang_extra_args: list[str] = Field(default_factory=list)
