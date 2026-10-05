@@ -12,14 +12,20 @@ from pathlib import Path
 
 import click
 
-from ipostudio.catalog.repo import find_model
-from ipostudio.catalog.scan import shard_family_complete
+from ipostudio.catalog.repo import find_model, upsert_models
+from ipostudio.catalog.scan import (
+    model_scan_roots,
+    scan_model_files,
+    shard_family_complete,
+)
 from ipostudio.cli.base import (
     _fail,
     _SuggestingGroup,
     open_config_and_db,
     open_db_only,
 )
+from ipostudio.cli.models_cmd import activate_model
+from ipostudio.conf.loader import ConfigError
 from ipostudio.conf.paths import resolve_data_dir
 from ipostudio.engines.discovery import resolve_engine
 from ipostudio.engines.llama_server import build_server_argv
@@ -335,3 +341,135 @@ def server_logs(lines: int) -> None:
         # engine output is third-party text: the redaction layer applies on
         # display just as it does on failure-detail tails (ENG F5)
         click.echo(redact_text(line))
+
+
+@click.command("start")
+@click.option("--server", "as_server", is_flag=True, default=True,
+              help="start the inference server (the default action; the flag "
+                   "exists for spec §9.11 option parity and is accepted but "
+                   "always on)")
+@click.option("--model", "model_name", default=None, metavar="NAME",
+              help="activate this model, then start the server")
+@click.option("--timeout", "timeout_s", type=float, default=DEFAULT_TIMEOUT_S,
+              show_default=True)
+@click.option("--cloud", "cloud", is_flag=True, default=False,
+              help="reserved: cloud providers arrive with the gateway plan")
+@click.option("--app-path", "app_path", default=None,
+              help="reserved: the desktop shell arrives with the P20 plan")
+def start(as_server: bool, model_name: str | None, timeout_s: float,
+          cloud: bool, app_path: str | None) -> None:
+    """Start the app's default services (spec §9.11)."""
+    if cloud or app_path:
+        reserved = " --cloud" if cloud else ""
+        reserved += " --app-path" if app_path else ""
+        _fail(
+            f"{reserved.strip()} is reserved for a later milestone (gateway "
+            f"plan / desktop shell plan) and is not available in this build; "
+            f"see `ipo guide`"
+        )
+    conn, cfg = open_config_and_db()
+    try:
+        if model_name is not None:
+            # ENG F7: an explicit selection is honored even when the gates
+            # below skip the start — the user asked for the activation
+            files, _skipped, _truncated = scan_model_files(
+                model_scan_roots(cfg.general.model_dirs, resolve_data_dir())
+            )
+            upsert_models(conn, files)
+            try:
+                activate_model(conn, model_name, cfg)
+            except (LookupError, ValueError, ConfigError) as exc:
+                _fail(str(exc))
+        running = active_instance(conn)
+        if running is not None:
+            click.echo(
+                f"server already running at http://{running['host']}:"
+                f"{running['port']} (model {running['model_name']}); "
+                f"`ipo server restart` applies the new selection"
+            )
+            return
+        if not cfg.general.auto_start_server:
+            click.echo(
+                "auto_start_server is off; nothing to start "
+                "(enable with `ipo config set auto_start_server true`)"
+            )
+            return
+        _run_start(conn, cfg, None, None, None, timeout_s)
+    finally:
+        conn.close()
+
+@click.command("status")
+@click.option("--json", "as_json", is_flag=True, help="emit machine-readable output")
+def status(as_json: bool) -> None:
+    """Show the default service status (exit 0 even when stopped)."""
+    conn = open_db_only()
+    try:
+        instance = active_instance(conn)
+        health = None
+        if instance is not None:
+            health = probe_health(instance["host"], instance["port"], 2.0)
+    finally:
+        conn.close()
+    state = instance["state"] if instance is not None else "stopped"
+    if as_json:
+        click.echo(
+            json.dumps(
+                {"state": state, "instance": instance, "health": health},
+                ensure_ascii=False, indent=2,
+            )
+        )
+        return
+    if instance is None:
+        click.echo("server: stopped (start with `ipo start` or `ipo server start`)")
+        return
+    click.echo(
+        f"server: {state} at http://{instance['host']}:{instance['port']} "
+        f"(model {instance['model_name']}); health: {health}"
+    )
+    if instance["state"] == "running" and health != "ok":
+        click.echo(
+            "not responding — the engine may have exited; see `ipo server logs` "
+            "or stop it with `ipo server stop`"
+        )
+
+@click.command("stop")
+def stop() -> None:
+    """Stop the default service (idempotent)."""
+    conn = open_db_only()
+    try:
+        stopped = stop_instance(conn)
+    finally:
+        conn.close()
+    if stopped is None:
+        click.echo("no running server instance")
+        return
+    if stopped["state"] != "stopped":
+        _fail(f"stop refused: {stopped['detail']}")
+    click.echo(f"server stopped (model {stopped['model_name']})")
+    if stopped["detail"]:
+        click.echo(f"note: {stopped['detail']}")
+
+@click.command("restart")
+@click.option("--model", "model_name", default=None, metavar="NAME")
+@click.option("--timeout", "timeout_s", type=float, default=DEFAULT_TIMEOUT_S,
+              show_default=True)
+def restart(model_name: str | None, timeout_s: float) -> None:
+    """Restart the default service (applies config and model changes)."""
+    conn, cfg = open_config_and_db()
+    try:
+        # precheck BEFORE stopping: a typo'd model or missing engine must
+        # never cost the user a running server (Codex DX fold); the
+        # selection persists, matching `ipo start --model` semantics
+        engine_path, problem = resolve_engine(cfg.engines.llama_cpp_path)
+        if engine_path is None:
+            _fail(problem)
+        if model_name is not None:
+            try:
+                activate_model(conn, model_name, cfg)
+            except (LookupError, ValueError, ConfigError) as exc:
+                _fail(str(exc))
+            model_name = None  # selection persisted; start resolves it
+        stop_instance(conn)
+        _run_start(conn, cfg, model_name, None, None, timeout_s)
+    finally:
+        conn.close()

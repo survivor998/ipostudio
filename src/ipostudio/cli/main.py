@@ -41,12 +41,12 @@ GUIDE_BRIEF = {
 WELCOME_STEPS: dict[str, list[tuple[str, str]]] = {
     "zh": [
         ("ipo doctor --fix", "初始化数据目录并完成环境体检"),
-        ("ipo config list", "浏览全部配置项"),
+        ("ipo models", "扫描本地模型目录（先放入 .gguf 模型文件）"),
         ("ipo guide", "阅读完整命令手册"),
     ],
     "en": [
         ("ipo doctor --fix", "initialize the data directory and verify the environment"),
-        ("ipo config list", "browse every setting"),
+        ("ipo models", "scan the local model directories (drop in a .gguf first)"),
         ("ipo guide", "read the full command manual"),
     ],
 }
@@ -75,13 +75,13 @@ def _welcome_initialized() -> bool:
 
 def _welcome_text(lang: str, initialized: bool) -> str:
     """State-aware first-run card: the arrow marks the next command —
-    doctor --fix before storage exists, guide afterwards (CEO F2b).
-    The three steps never move; only the arrow does, so the card shape
-    stays stable for users and tests alike."""
+    doctor --fix before storage exists, models afterwards (the core-loop
+    entry, spec §9.11).  The three steps never move; only the arrow does,
+    so the card shape stays stable for users and tests alike."""
     lines = [WELCOME_HEAD[lang].format(version=__version__)]
     for command, description in WELCOME_STEPS[lang]:
         is_next = (command == "ipo doctor --fix" and not initialized) or (
-            command == "ipo guide" and initialized
+            command == "ipo models" and initialized
         )
         mark = f"  {WELCOME_ARROW[lang]}" if is_next else ""
         lines.append(f"  {command}    {description}{mark}")
@@ -741,6 +741,10 @@ cli.add_command(models)
 cli.add_command(model)
 cli.add_command(model_info)
 
-from ipostudio.cli.server_cmd import server
+from ipostudio.cli.server_cmd import restart, server, start, status, stop
 
 cli.add_command(server)
+cli.add_command(start)
+cli.add_command(status)
+cli.add_command(stop)
+cli.add_command(restart)

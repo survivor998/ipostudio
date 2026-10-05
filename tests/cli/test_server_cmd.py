@@ -166,3 +166,65 @@ def test_remote_mode_and_non_llama_engine_are_honest(service_env):
     blocked = _invoke("server", "start")
     assert blocked.exit_code == 1
     assert "llama.cpp" in blocked.stderr
+
+
+def test_start_shorthand_boots_the_default_service(service_env, monkeypatch):
+    _patch_fake_engine(monkeypatch)
+    assert _invoke("model", "--select", "tiny-q4").exit_code == 0
+    started = _invoke("start")
+    assert started.exit_code == 0, started.stderr
+    assert "server running" in started.output
+    _invoke("stop")
+
+def test_start_shorthand_honors_auto_start_off(service_env):
+    runner = CliRunner()
+    assert runner.invoke(
+        cli, ["config", "set", "auto_start_server", "false"]
+    ).exit_code == 0
+    result = _invoke("start")
+    assert result.exit_code == 0
+    assert "auto_start_server is off" in result.output
+
+def test_start_shorthand_is_idempotent_when_running(service_env, monkeypatch):
+    _patch_fake_engine(monkeypatch)
+    assert _invoke("model", "--select", "tiny-q4").exit_code == 0
+    assert _invoke("start").exit_code == 0
+    again = _invoke("start")
+    assert again.exit_code == 0
+    assert "already running" in again.output
+    _invoke("stop")
+
+def test_start_selects_model_then_boots(service_env, monkeypatch):
+    _patch_fake_engine(monkeypatch)
+    started = _invoke("start", "--model", "tiny-q4")
+    assert started.exit_code == 0, started.stderr
+    active = _invoke("config", "get", "local_chat_model")
+    assert "tiny-q4" in active.output
+    _invoke("stop")
+
+def test_reserved_flags_fail_with_plan_pointers(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    cloud = _invoke("start", "--cloud")
+    assert cloud.exit_code == 1
+    assert "reserved" in cloud.stderr and "gateway" in cloud.stderr
+    app = _invoke("start", "--app-path", "D:/apps/demo")
+    assert app.exit_code == 1
+    assert "reserved" in app.stderr
+
+def test_status_json_stays_clean_when_stopped(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    result = _invoke("status", "--json")
+    assert result.exit_code == 0
+    assert "\x1b[" not in result.output
+    payload = json.loads(result.output)
+    assert payload["state"] == "stopped"
+
+def test_stop_and_restart_shorthands(service_env, monkeypatch):
+    _patch_fake_engine(monkeypatch)
+    assert _invoke("model", "--select", "tiny-q4").exit_code == 0
+    assert _invoke("start").exit_code == 0
+    assert _invoke("restart").exit_code == 0
+    assert "running" in _invoke("status").output
+    stopped = _invoke("stop")
+    assert stopped.exit_code == 0
+    assert "stopped" in stopped.output

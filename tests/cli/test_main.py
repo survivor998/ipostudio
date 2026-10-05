@@ -576,7 +576,7 @@ def test_bare_invocation_prints_welcome_card(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert __version__ in result.output
     assert "ipo doctor --fix" in result.output
-    assert "ipo config list" in result.output
+    assert "ipo models" in result.output
     assert "ipo guide" in result.output
 
 
@@ -629,14 +629,14 @@ def test_welcome_card_marks_next_step_by_state(tmp_path, monkeypatch):
     monkeypatch.delenv("IPO_CONFIG", raising=False)
     result = invoke()
     doctor_line = next(l for l in result.output.splitlines() if "ipo doctor --fix" in l)
-    guide_line = next(l for l in result.output.splitlines() if "ipo guide" in l)
+    models_line = next(l for l in result.output.splitlines() if "ipo models" in l)
     assert "从这里开始" in doctor_line  # uninitialized: doctor --fix is next
-    assert "从这里开始" not in guide_line
+    assert "从这里开始" not in models_line
     assert invoke("doctor", "--fix").exit_code == 0
     result2 = invoke()
     doctor_line2 = next(l for l in result2.output.splitlines() if "ipo doctor --fix" in l)
-    guide_line2 = next(l for l in result2.output.splitlines() if "ipo guide" in l)
-    assert "从这里开始" in guide_line2  # initialized: guide is next
+    models_line2 = next(l for l in result2.output.splitlines() if "ipo models" in l)
+    assert "从这里开始" in models_line2  # initialized: models is the core-loop entry
     assert "从这里开始" not in doctor_line2
 
 
