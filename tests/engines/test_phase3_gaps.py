@@ -134,6 +134,39 @@ def test_probe_targets_loopback_for_the_unspecified_address():
     thread.join(timeout=5)
 
 
+def test_probe_targets_ipv6_loopback_for_the_v6_wildcard():
+    # the `::` arm of _probe_host: an IPv6 wildcard bind never accepts IPv4
+    # on Windows (IPV6_V6ONLY defaults to 1), so the probe must target ::1 —
+    # translating `::` to 127.0.0.1 aims the health probe of a documented
+    # `--host ::` start at a refused destination, and /props identity would
+    # read "absent" (stop without signal) for a live engine
+    class Ok(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    class V6(ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+
+    server = V6(("::", 0), Ok)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]  # AF_INET6 address is a 4-tuple
+        assert probe_health("::", port, 1.0) == "ok"
+        # the identity probe must translate consistently with the health
+        # probe: "foreign" proves the request REACHED the engine (an
+        # unreachable port would verdict "absent" and skip the stop signal)
+        assert probe_identity("::", port, "m.gguf", 1.0) == "foreign"
+    finally:
+        server.shutdown()
+    thread.join(timeout=5)
+
+
 def test_probe_health_non_503_http_error_is_down():
     class NotFound(BaseHTTPRequestHandler):
         def do_GET(self):

@@ -10,6 +10,7 @@ import click
 from ipostudio.cli.base import _fail, open_config_and_db
 from ipostudio.engines.openai_client import ChatError, chat_completion
 from ipostudio.engines.repo import active_instance, record_completion
+from ipostudio.engines.supervisor import _probe_host
 
 
 @click.command("chat")
@@ -50,8 +51,12 @@ def chat(prompt: str, timeout_s: float) -> None:
             )
         started = time.monotonic()
         try:
+            # the recorded host is the BIND address: a wildcard never is a
+            # connect destination (supervisor._probe_host rule — ba4e590 made
+            # `--host 0.0.0.0` starts succeed, so chat must reach the same
+            # engine the probes do; TODO-024 owns the full separation)
             response = chat_completion(
-                instance["host"], instance["port"],
+                _probe_host(instance["host"]), instance["port"],
                 model=instance["model_name"], prompt=prompt,
                 temperature=cfg.tuning.server_temp,
                 top_p=cfg.tuning.server_top_p,

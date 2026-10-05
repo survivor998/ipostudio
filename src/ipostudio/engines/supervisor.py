@@ -50,12 +50,17 @@ def _now() -> str:
 
 def _probe_host(host: str) -> str:
     """The connect target for probing a bound address.  The unspecified
-    address is a bind wildcard, never a destination: Windows refuses a
+    addresses are bind wildcards, never destinations: Windows refuses a
     connect to 0.0.0.0 outright (WSAEADDRNOTAVAIL class) where POSIX happens
-    to route it to loopback — so the documented-supported `--host 0.0.0.0`
-    start could never finish its own health check there.  Binding, argv and
-    the instance row keep the configured host; only the probe connects."""
-    return "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    to route it to loopback, and an IPv6 `::` socket accepts no IPv4
+    destination at all there (IPV6_V6ONLY defaults to enabled), so each
+    wildcard translates to its own loopback.  Binding, argv and the
+    instance row keep the configured host; only the probe connects."""
+    if host == "0.0.0.0":
+        return "127.0.0.1"
+    if host == "::":
+        return "::1"
+    return host
 
 def probe_health(host: str, port: int, timeout_s: float) -> str:
     """'ok' | 'loading' | 'down'.  llama-server answers 503 while the model

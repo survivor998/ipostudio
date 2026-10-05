@@ -88,6 +88,43 @@ def test_chat_record_survives_reconnect(running_service):
     assert record["instance_id"] == instance_id
     fresh.close()
 
+def test_chat_reaches_loopback_engine_when_the_row_records_the_wildcard_host(
+    tmp_path, monkeypatch,
+):
+    # ba4e590 cross-effect fold: `server start --host 0.0.0.0` now SUCCEEDS on
+    # Windows (the supervisor probes translate the wildcard to loopback) and
+    # the instance row keeps the configured host — chat must apply the same
+    # translate-only-the-connect-target rule, or the documented-supported
+    # wildcard start leaves an engine that `ipo chat` can never reach
+    # (connect-to-0.0.0.0 is refused on Windows, WSAEADDRNOTAVAIL class).
+    monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
+    (tmp_path / "models").mkdir()  # Codex determinism fold
+    (tmp_path / "models" / "tiny-q4.gguf").write_bytes(GGUF + b"\x00" * 36)
+    runner = CliRunner()
+    assert runner.invoke(cli, ["model", "--select", "tiny-q4"]).exit_code == 0
+    conn = open_db(tmp_path / "data" / "app.db")
+    migrate(conn)
+    port = choose_port("127.0.0.1", 18900)
+    argv = [sys.executable, str(FAKE), "--host", "127.0.0.1", "--port", str(port),
+            "--model", "tiny-q4.gguf"]
+    outcome = start_instance(
+        conn, argv, engine="llama.cpp", model_name="tiny-q4",
+        model_path="tiny-q4.gguf", host="0.0.0.0", port=port,
+        log_path=tmp_path / "logs" / "engine.log", timeout_s=20,
+        poll_interval=0.05,
+    )
+    assert outcome.ok, outcome.instance["detail"]
+    assert outcome.instance["host"] == "0.0.0.0"  # row keeps the configured host
+    try:
+        result = runner.invoke(cli, ["chat", "hello"])
+        assert result.exit_code == 0, result.stderr
+        assert "echo:hello" in result.output
+        assert last_completion(conn)["status"] == "ok"
+    finally:
+        stop_instance(conn)
+        conn.close()
+
+
 def test_chat_without_server_guides_start(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     result = _invoke("chat", "hello")
