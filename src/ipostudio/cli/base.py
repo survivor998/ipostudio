@@ -7,9 +7,23 @@ import click
 
 from ipostudio.cli.ui import use_color
 from ipostudio.conf.loader import ConfigError, load_config, suggest_key
-from ipostudio.conf.paths import resolve_db_path
+from ipostudio.conf.paths import resolve_data_dir, resolve_db_path
 from ipostudio.conf.schema import AppConfig
+from ipostudio.logs import setup_logging
 from ipostudio.store.database import migrate, open_db
+
+
+def _install_app_logging() -> None:
+    """ADR-006 / TODO-004: the short-lived CLI shares
+    ``<data>/logs/ipostudio.log`` (rotating, redacting).  File-only — records
+    must never duplicate the command's own stdout/stderr error contract — and
+    best practice says logging must never take a command down: an unwritable
+    log location is silently ignored, the command's own error handling stays
+    the single source of user truth."""
+    try:
+        setup_logging(resolve_data_dir(), console=False)
+    except OSError:
+        pass
 
 
 class _SuggestingGroup(click.Group):
@@ -39,6 +53,7 @@ class _SuggestingGroup(click.Group):
 def open_config_and_db() -> tuple[sqlite3.Connection, AppConfig]:
     """Shared entry for commands that need effective config plus a migrated
     database.  Any failure prints a structured stderr line and exits 1."""
+    _install_app_logging()
     try:
         cfg = load_config()
         conn = open_db(resolve_db_path())
@@ -69,6 +84,7 @@ def open_db_only() -> sqlite3.Connection:
     """Migrated database without loading settings.toml (Codex recovery fold):
     stop/status/list/info must work even when the config file is broken —
     a user must always be able to stop what they started."""
+    _install_app_logging()
     try:
         conn = open_db(resolve_db_path())
         migrate(conn)

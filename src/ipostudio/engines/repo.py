@@ -4,10 +4,13 @@ Dependency direction: SERVICE_STATES and the row primitives live in
 supervisor.py; this module adds the query/insert surface and never gets
 imported by the supervisor (no cycle)."""
 
+import logging
 import sqlite3
 
 from ipostudio.engines.supervisor import SERVICE_STATES
-from ipostudio.logs import redact_text
+from ipostudio.logs import LOGGER_NAME, redact_text
+
+logger = logging.getLogger(LOGGER_NAME)
 
 __all__ = [
     "SERVICE_STATES",
@@ -67,6 +70,10 @@ def record_completion(
              redact_text(output_text)[:2000], prompt_chars, output_chars,
              duration_ms, status, redact_text(detail)[:2000]),
         )
+    logger.info(
+        "completion recorded: instance=%s model=%s status=%s chars=%s in %sms",
+        instance_id, model_name, status, output_chars, duration_ms,
+    )
 
 def last_completion(conn: sqlite3.Connection) -> dict | None:
     row = conn.execute(

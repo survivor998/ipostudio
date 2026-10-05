@@ -12,6 +12,7 @@ that started the server may take the engine down with it; the durable
 background service is P3 scope (ADR-004)."""
 
 import json
+import logging
 import os
 import signal
 import socket
@@ -22,7 +23,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ipostudio.logs import redact_text
+from ipostudio.logs import LOGGER_NAME, redact_text
+
+logger = logging.getLogger(LOGGER_NAME)
 
 SERVICE_STATES = ("stopped", "starting", "loading", "running", "failed")
 ENGINE_LOG_FILE = "engine-llama-cpp.log"  # TODO-004 convention: per-process file
@@ -169,6 +172,8 @@ def start_instance(
     try:
         log_handle = log_path.open("ab")
     except OSError as exc:
+        logger.warning("server start failed: cannot open engine log %s: %s",
+                       log_path, exc)
         _fail_row(conn, instance_id, f"cannot open engine log {log_path}: {exc}",
                   expect=("starting", "loading"))
         return outcome(False)
@@ -181,6 +186,8 @@ def start_instance(
                 stderr=log_handle,
             )
         except OSError as exc:
+            logger.warning("server start failed: cannot start engine %s: %s",
+                           argv[0], exc)
             _fail_row(conn, instance_id, f"cannot start engine {argv[0]}: {exc}",
                       expect=("starting", "loading"))
             return outcome(False)
@@ -190,6 +197,10 @@ def start_instance(
         try:
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
+                    logger.warning(
+                        "server start failed: engine exited during startup "
+                        "with code %s (instance %s)", proc.returncode, instance_id,
+                    )
                     _fail_row(
                         conn, instance_id,
                         f"engine exited during startup with code {proc.returncode}; "
@@ -206,6 +217,11 @@ def start_instance(
                                   expect=("starting", "loading")):
                         proc.terminate()
                         return outcome(False)
+                    logger.info(
+                        "server started: engine=%s model=%s at %s:%s "
+                        "(pid %s, instance %s)",
+                        engine, model_name, host, port, proc.pid, instance_id,
+                    )
                     return outcome(True)
                 if health == "loading" and observed != "loading":
                     observed = "loading"
@@ -215,6 +231,8 @@ def start_instance(
                         return outcome(False)
                 time.sleep(poll_interval)
         except KeyboardInterrupt:
+            logger.warning("server start interrupted (Ctrl+C), instance %s",
+                           instance_id)
             proc.terminate()
             _fail_row(conn, instance_id, "startup wait interrupted (Ctrl+C)",
                       expect=("starting", "loading"))
@@ -228,6 +246,10 @@ def start_instance(
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _signal(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        logger.warning(
+            "server start failed: health not ready within %gs; engine "
+            "terminated (instance %s)", timeout_s, instance_id,
+        )
         _fail_row(
             conn, instance_id,
             f"health check did not report ready within {timeout_s:g}s; the "
@@ -313,6 +335,8 @@ def stop_instance(
         identity = identify(instance["host"], instance["port"],
                             instance["model_path"], 2.0)
         if identity == "owned":
+            logger.info("server stop: signaling pid %s (instance %s)",
+                        pid, instance["id"])
             _signal(pid, signal.SIGTERM)
             deadline = time.monotonic() + grace_s
             # grace wait keys on the health probe going down (the process
@@ -326,6 +350,10 @@ def stop_instance(
             else:
                 _signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         elif identity == "foreign":
+            logger.warning(
+                "server stop refused: port answers with a different model "
+                "document (instance %s, pid %s)", instance["id"], pid,
+            )
             _touch(
                 conn, instance["id"],
                 detail=(detail + "; " if detail else "") + (
@@ -344,6 +372,8 @@ def stop_instance(
         conn, instance["id"], state="stopped", stopped_at=_now(),
         detail=detail, expect=("starting", "loading", "running"),
     )
+    logger.info("server stopped: instance %s (model %s)",
+                instance["id"], instance["model_name"])
     return _get(conn, instance["id"])
 
 def _signal(pid: int, sig: int) -> None:

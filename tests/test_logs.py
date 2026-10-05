@@ -76,3 +76,18 @@ def test_setup_logging_is_idempotent(tmp_path):
     second = setup_logging(tmp_path)
     assert first is second
     assert len(second.handlers) == 2  # one console + one file
+
+
+def test_setup_logging_console_false_writes_file_only(tmp_path):
+    """CLI wiring (ADR-006 / TODO-004): commands install file-only logging so
+    records never duplicate the command's own stdout/stderr contract."""
+    logger = setup_logging(tmp_path, console=False)
+    logger.info("file-only record")
+    stream_handlers = [
+        h for h in logger.handlers
+        if isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    assert not stream_handlers, "console=False must install no stream handler"
+    content = log_file_path(tmp_path).read_text(encoding="utf-8")
+    assert "file-only record" in content

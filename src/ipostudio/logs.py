@@ -147,7 +147,14 @@ def setup_logging(
     json_lines: bool = False,
     max_bytes: int = 2_000_000,
     backups: int = 5,
+    console: bool = True,
 ) -> logging.Logger:
+    """Install the "ipostudio" logger with a rotating, redacting file handler.
+
+    ``console=False`` serves the CLI wiring (ADR-006 / TODO-004: short-lived
+    commands share ``ipostudio.log`` file-only): records must never duplicate
+    the command's own stdout/stderr error contract on the terminal.
+    """
     logger = logging.getLogger(LOGGER_NAME)
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
@@ -156,7 +163,6 @@ def setup_logging(
     logger.propagate = False
 
     (data_dir / "logs").mkdir(parents=True, exist_ok=True)
-    console = logging.StreamHandler()
     file_handler = RotatingFileHandler(
         log_file_path(data_dir), maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
     )
@@ -165,7 +171,10 @@ def setup_logging(
         if json_lines
         else _PlainTextFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     )
-    for handler in (console, file_handler):
+    handlers: list[logging.Handler] = [file_handler]
+    if console:
+        handlers.insert(0, logging.StreamHandler())
+    for handler in handlers:
         handler.setFormatter(formatter)
         handler.addFilter(RedactionFilter())
         logger.addHandler(handler)

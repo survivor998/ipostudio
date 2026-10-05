@@ -381,3 +381,33 @@ def test_service_states_match_migration_check(tmp_path):
 
 def test_engine_log_path_is_per_process_named(tmp_path):
     assert engine_log_path(tmp_path) == tmp_path / "logs" / "engine-llama-cpp.log"
+
+
+def test_lifecycle_and_completions_are_recorded_in_the_app_log(tmp_path, monkeypatch):
+    """Phase-1 E2E finding: the app log (ADR-006) was never wired, so server
+    lifecycle events existed only as terminal lines.  With the log installed,
+    start/stop/completion seams must leave records in it."""
+    from ipostudio.logs import log_file_path, setup_logging
+
+    setup_logging(tmp_path, console=False)
+    conn = _db(tmp_path)
+    outcome = start_instance(
+        conn, ["engine"], **_spawned_kwargs(tmp_path, _FakeProc(), lambda *a: "ok")
+    )
+    assert outcome.ok is True
+    record_completion(
+        conn, instance_id=outcome.instance["id"], model_name="m",
+        prompt_chars=1, output_chars=1, duration_ms=2, status="ok",
+    )
+    kills = []
+    monkeypatch.setattr(supervisor.os, "kill", lambda pid, sig: kills.append(sig))
+    stopped = stop_instance(
+        conn, identify=lambda *a, **k: "owned", probe=lambda *a, **k: "down"
+    )
+    assert stopped is not None and stopped["state"] == "stopped"
+    conn.close()
+
+    content = log_file_path(tmp_path).read_text(encoding="utf-8")
+    assert "server started" in content
+    assert "completion recorded" in content
+    assert "server stopped" in content
