@@ -740,3 +740,7 @@ from ipostudio.cli.models_cmd import model, model_info, models
 cli.add_command(models)
 cli.add_command(model)
 cli.add_command(model_info)
+
+from ipostudio.cli.server_cmd import server
+
+cli.add_command(server)

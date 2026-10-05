@@ -74,7 +74,8 @@ def test_every_json_capable_command_stays_clean(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_main, "use_color", lambda: True)
     cases = sorted(_json_invocations())
     assert {"version --json", "doctor --json", "config path --json", "config list --json",
-            "models --json", "model --json"} <= {
+            "models --json", "model --json",
+            "server info --json", "server list --json"} <= {
         " ".join(args) for args in cases
     }
     for args in cases:
