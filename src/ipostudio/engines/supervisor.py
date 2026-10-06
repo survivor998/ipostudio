@@ -29,6 +29,7 @@ logger = logging.getLogger(LOGGER_NAME)
 
 SERVICE_STATES = ("stopped", "starting", "loading", "running", "failed")
 ENGINE_LOG_FILE = "engine-llama-cpp.log"  # TODO-004 convention: per-process file
+_PROPS_BODY_CAP = 1 << 20  # /props is a few KiB; 1 MiB is far past any real document
 
 _INSTANCE_COLUMNS = (
     "id, engine, engine_version, model_name, model_path, host, port, pid, "
@@ -315,15 +316,23 @@ def probe_identity(
         with urllib.request.urlopen(
             f"http://{host_part}:{port}/props", timeout=timeout_s
         ) as response:
-            body = response.read().decode("utf-8", errors="replace")
+            # the recorded port may hold a hostile or corrupted occupant:
+            # bound the read (cap + 1 byte detects truncation) so a huge or
+            # slow-dripping body cannot drain memory
+            raw = response.read(_PROPS_BODY_CAP + 1)
     except urllib.error.HTTPError:
         return "absent"
     except OSError:
         return "absent"
+    if len(raw) > _PROPS_BODY_CAP:
+        return "foreign"  # truncated document: ownership stays unproven
+    body = raw.decode("utf-8", errors="replace")
     try:
         document = json.loads(body)
-    except ValueError:
-        return "foreign"  # not a props document: ownership stays unproven
+    except (ValueError, RecursionError):
+        # not a props document (RecursionError is not a ValueError): the
+        # refusal verdict must absorb deeply nested payloads too
+        return "foreign"
     return "owned" if _document_names_model(document, model_path) else "foreign"
 
 def stop_instance(

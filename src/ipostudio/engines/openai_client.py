@@ -13,6 +13,10 @@ from ipostudio.logs import redact_unambiguous
 class ChatError(Exception):
     """A completion could not be produced; the message is user-safe."""
 
+# one completion payload is a few KiB; 16 MiB leaves generous room for very
+# long answers while still bounding what a runaway engine can make us buffer
+_RESPONSE_BODY_CAP = 16 * 1024 * 1024
+
 def chat_completion(
     host: str,
     port: int,
@@ -52,10 +56,13 @@ def chat_completion(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            return json.loads(response.read().decode("utf-8"))
+            # bound the read (cap + 1 byte detects truncation): a runaway or
+            # hostile engine must not be able to drain memory with a huge or
+            # slow-dripping body
+            raw = response.read(_RESPONSE_BODY_CAP + 1)
     # HTTPError subclasses OSError: this arm must come first
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        detail = exc.read(1024).decode("utf-8", errors="replace")[:500]
         raise ChatError(
             f"server returned HTTP {exc.code}: {redact_unambiguous(detail)}; "
             f"check `ipo server logs` for the engine output"
@@ -72,5 +79,19 @@ def chat_completion(
             f"({redact_unambiguous(str(exc))}); start it with "
             f"`ipo server start`"
         ) from exc
-    except ValueError as exc:
-        raise ChatError(f"server response was not valid JSON: {exc}") from exc
+    if len(raw) > _RESPONSE_BODY_CAP:
+        # never attempt to parse a truncated body
+        raise ChatError(
+            f"server response exceeded the read cap of {_RESPONSE_BODY_CAP} "
+            f"bytes; the engine is not answering like a completions endpoint "
+            f"— check `ipo server logs` for the engine output"
+        )
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
+        # RecursionError is not a ValueError: deeply nested payloads must
+        # reach the caller as ChatError, never a bare traceback
+        raise ChatError(
+            f"server response was not valid JSON: {exc}; check "
+            f"`ipo server logs` for the engine output"
+        ) from exc

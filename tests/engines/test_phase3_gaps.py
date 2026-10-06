@@ -4,7 +4,8 @@ Pins the branches the core-loop suites never reached: port-boundary and
 address-family selection, health/identity probe arms against non-HTTP,
 non-503 and non-JSON responders, the log-open failure and Ctrl+C arms of
 `start_instance`, the NULL-pid stop path, redaction/truncation at the
-persistence boundary, and the HTTP-500 / bad-JSON arms of the chat client.
+persistence boundary, the HTTP-500 / bad-JSON arms of the chat client, and
+the read caps / deeply-nested-JSON parse failures on both HTTP surfaces.
 """
 
 import json
@@ -212,6 +213,67 @@ def test_probe_identity_garbage_body_is_foreign_and_404_is_absent():
     thread.join(timeout=5)
 
 
+def test_probe_identity_oversized_props_body_cannot_prove_ownership(monkeypatch):
+    # gstack F2: the /props read had no cap — a hostile occupant on the
+    # recorded port could drain memory or stall the probe.  An oversized body
+    # that NAMES the model must not read as "owned": an unprovable identity
+    # takes the safe refusal verdict, never the signal path.
+    class OversizedProps(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/props":
+                body = json.dumps(
+                    {"model_path": "m.gguf", "pad": "x" * 200}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    monkeypatch.setattr(supervisor, "_PROPS_BODY_CAP", 64, raising=False)
+    server, thread = _http_server(OversizedProps)
+    try:
+        host, port = server.server_address
+        assert probe_identity(host, port, "m.gguf", 1.0) == "foreign"
+    finally:
+        server.shutdown()
+    thread.join(timeout=5)
+
+
+def test_probe_identity_deeply_nested_json_is_foreign_not_traceback():
+    # RecursionError is NOT a ValueError: the old except clause let it escape
+    # probe_identity as a bare traceback out of `ipo server stop` — an
+    # error-contract violation that must fold into the "foreign" arm
+    deep = b"[" * 100000 + b"]" * 100000
+
+    class Nested(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/props":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(deep)))
+                self.end_headers()
+                self.wfile.write(deep)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server, thread = _http_server(Nested)
+    try:
+        host, port = server.server_address
+        assert probe_identity(host, port, "m.gguf", 2.0) == "foreign"
+    finally:
+        server.shutdown()
+    thread.join(timeout=5)
+
+
 def test_start_instance_log_open_failure_marks_failed(tmp_path):
     # the engine log path is blocked by a regular file: start must land a
     # failed row carrying the reason, never a traceback
@@ -353,6 +415,74 @@ def test_chat_completion_non_json_200_raises_chat_error():
             pass
 
     server, thread = _http_server(Garbage)
+    try:
+        host, port = server.server_address
+        with pytest.raises(ChatError) as excinfo:
+            chat_completion(
+                host, port, model="m", prompt="hi", temperature=0.2, top_p=0.9,
+                top_k=40, repeat_penalty=1.1, timeout_s=5,
+            )
+    finally:
+        server.shutdown()
+    thread.join(timeout=5)
+    assert "not valid JSON" in str(excinfo.value)
+
+
+def test_chat_completion_oversized_body_raises_chat_error(monkeypatch):
+    # gstack F2: the completions read had no cap — a runaway engine could
+    # drain memory.  Hitting the cap is a ChatError with fix guidance; the
+    # client must never try to parse the truncated body.
+    from ipostudio.engines import openai_client
+
+    class Huge(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = json.dumps(
+                {"choices": [{"message": {"content": "hi"}}], "pad": "x" * 200}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    monkeypatch.setattr(openai_client, "_RESPONSE_BODY_CAP", 64, raising=False)
+    server, thread = _http_server(Huge)
+    try:
+        host, port = server.server_address
+        with pytest.raises(ChatError) as excinfo:
+            chat_completion(
+                host, port, model="m", prompt="hi", temperature=0.2, top_p=0.9,
+                top_k=40, repeat_penalty=1.1, timeout_s=5,
+            )
+    finally:
+        server.shutdown()
+    thread.join(timeout=5)
+    message = str(excinfo.value)
+    assert "read cap" in message
+    assert "server logs" in message  # fix guidance stays part of the contract
+
+
+def test_chat_completion_deeply_nested_json_raises_chat_error():
+    # the deep-nesting sibling of the bad-JSON arm: json.loads raises
+    # RecursionError (not ValueError), which the client must fold into
+    # ChatError instead of letting a traceback escape `ipo chat`
+    deep = b"[" * 100000 + b"]" * 100000
+
+    class Nested(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(deep)))
+            self.end_headers()
+            self.wfile.write(deep)
+
+        def log_message(self, *args):
+            pass
+
+    server, thread = _http_server(Nested)
     try:
         host, port = server.server_address
         with pytest.raises(ChatError) as excinfo:
