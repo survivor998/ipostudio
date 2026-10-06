@@ -226,3 +226,13 @@
 - **Effort:** human: S / CC: S
 - **Priority:** P3
 - **Depends on:** 无
+
+## TODO-027: 两轮落地后评审遗留的观感级小修合集
+- **What:** 修复批（2026-10-06，commit 48f09a0..2e44648）只收口了 MODERATE/Important 级发现，以下观感级 Minor 有意留待后续小批：① supervisor `_touch(conn, instance_id, pid=proc.pid)`（supervisor.py:213 附近）无 `expect=("starting",)`——并发 stop 先退休行时 pid 会写进 stopped 行（信息性显示瑕疵；建议加 expect 并忽略失败，pid 本就是 advisory）；② stop 的 `pid is None` 分支（supervisor.py stop_instance 内）静默 retire 行、detail 无任何指引文案（对比 absent/foreign 分支都会追加 guidance）；③ 启动失败 detail 为空串时拼接 `" (you passed --port …)"` 会产生 `error:  (you passed…)` 双空格前导（server_cmd.py `_run_start` 失败臂，极窄竞态窗口）；④ `server logs --lines 0` 与负数打印整个文件而非报错或打印空（server_cmd.py `server_logs`）；⑤ stop 宽限等待循环期间 Ctrl+C 带 traceback 退出、行留 active（SIGTERM 已发出，重跑 stop 即对账；supervisor.py 宽限 while 循环）；⑥ `ipo models` 把所有重名行都标 `*`（models_cmd.py 列表渲染按 `row["name"] == active` 匹配；激活侧已有歧义守卫，纯显示面）；⑦ 端口耗尽消息 `{base}..{base+19}` 在 base 逼近 65535 时虚报候选窗（server_cmd.py `_run_start` 的 choose_port 失败臂，边界态文案）；⑧ `find_model` 的 normalize 臂与 suffix 臂各调一次 `list_models`——一次解析两读全表（catalog/repo.py；表 ≤500 行有界，热路径成本与 TODO-025 相邻，宜同期设计）。
+- **Why:** 均为观感/防御纵深/微效率问题，单独成批不值当评审与测试成本；但不登记就会在评审报告里失焦（独立评审 Recommendation 2 的裁决精神）。
+- **Pros:** 一次性小批收口，每条都有明确落点与建议修法；与 TODO-025（⑧ 的热路径归属）天然同批。
+- **Cons:** 八条跨 supervisor/scan/server_cmd/models_cmd/repo 五个文件，需拆分提交与逐条测试；部分（①③⑤⑦）触发条件极窄，回归测试需注入构造。
+- **Context:** 来源：两轮 post-landing 评审——.superpowers/sdd/review-gstack-report.md（Appendix 及 INFORMATIONAL 未收口项）与 .superpowers/sdd/review-independent-report.md（Minor 1/3/4/6/7/8 及 Minor 2 已由修复批 ce8002e 收口、Minor 5 已由 e075e8a 收口）；修复批登记时逐条核对行号与代码现状一致。
+- **Effort:** human: S / CC: S
+- **Priority:** P3
+- **Depends on:** 无
