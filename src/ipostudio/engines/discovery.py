@@ -10,13 +10,15 @@ from pathlib import Path
 ENGINE_COMMAND = "llama-server"
 
 def resolve_engine(configured: str) -> tuple[Path | None, str | None]:
-    """Return (path, problem).  A configured path wins when it exists; an
-    empty setting falls back to PATH.  A configured path that does not exist
-    is a hard problem — silently ignoring user configuration would start the
-    wrong engine or quietly shadow it."""
+    """Return (path, problem).  A configured path wins when it is a FILE (a
+    directory would only fail later at Popen with a confusing "cannot start
+    engine" instead of a config-point diagnosis); an empty setting falls
+    back to PATH.  A configured path that does not exist is a hard problem —
+    silently ignoring user configuration would start the wrong engine or
+    quietly shadow it."""
     if configured.strip():
         path = Path(configured.strip()).expanduser()
-        if path.exists():
+        if path.is_file():
             return path, None
         return None, (
             f"configured engines.llama_cpp_path does not exist: {path}; "

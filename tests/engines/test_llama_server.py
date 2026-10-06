@@ -20,6 +20,15 @@ def test_resolve_engine_configured_but_missing_is_a_problem(tmp_path):
     assert "does not exist" in problem
     assert "llama_cpp_path" in problem
 
+def test_resolve_engine_rejects_directory_as_configured_path(tmp_path):
+    # gstack F5: a directory used to pass `path.exists()` and failure was
+    # deferred to Popen's confusing "cannot start engine"; it must fall
+    # through to the same config-point diagnosis as a missing path
+    path, problem = resolve_engine(str(tmp_path))
+    assert path is None
+    assert "llama_cpp_path" in problem
+    assert "ipo config set" in problem
+
 def test_resolve_engine_reports_missing_from_path(monkeypatch):
     monkeypatch.setenv("PATH", "")
     path, problem = resolve_engine("")
