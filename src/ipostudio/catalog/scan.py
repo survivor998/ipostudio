@@ -179,7 +179,9 @@ def scan_model_files(roots: list[Path]) -> tuple[list[ModelFile], int, bool]:
         if any(size is None for size in sizes) or not all(
             looks_like_gguf(shard) for shard in shards
         ):
-            skipped += 1
+            # same per-FILE invariant as the contiguity arm above: a family
+            # rejected for bad magic or a missing size counts every shard
+            skipped += len(shards)
             continue
         models.append(ModelFile(base, path, sum(sizes), "gguf", len(shards)))
     return models, skipped, truncated

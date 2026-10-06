@@ -106,8 +106,19 @@ def test_non_contiguous_shard_set_is_rejected(tmp_path):
     root.mkdir()
     _write_gguf(root / "x-00001-of-00002.gguf", size=10)
     _write_gguf(root / "x-00003-of-00002.gguf", size=10)
-    files, skipped, _truncated = scan_model_files([root])
+    files, skipped, _ = scan_model_files([root])
     assert files == [] and skipped == 2  # Codex contiguity fold
+
+def test_bad_magic_shard_family_counts_every_rejected_file(tmp_path):
+    # gstack F3: the bad-magic/missing-size arm counted one skip per FAMILY
+    # while the contiguity arm counts per FILE — a 3-shard family with all
+    # bad magic must report skipped == 3 ("every rejected FILE counts")
+    root = tmp_path / "models"
+    _write_gguf(root / "bad-00001-of-00003.gguf", head=b"NOPE")
+    _write_gguf(root / "bad-00002-of-00003.gguf", head=b"NOPE")
+    _write_gguf(root / "bad-00003-of-00003.gguf", head=b"NOPE")
+    files, skipped, _ = scan_model_files([root])
+    assert files == [] and skipped == 3
 
 def test_visit_budget_bounds_non_gguf_directories(tmp_path, monkeypatch):
     import ipostudio.catalog.scan as scan_module
