@@ -150,3 +150,15 @@ def test_chat_stdin_prompt(running_service):
     result = CliRunner().invoke(cli, ["chat", "-"], input="piped prompt\n")
     assert result.exit_code == 0, result.stderr
     assert "echo:piped prompt" in result.output
+
+def test_chat_help_renders_prompt_argument_as_required():
+    # gstack F4 / independent Minor-5: PROMPT is a REQUIRED argument — the
+    # click usage line must not bracket it ([PROMPT] is click's optional
+    # convention), and the `ipo help` surface must keep rendering <PROMPT>
+    # so the two surfaces agree
+    result = _invoke("chat", "--help")
+    assert result.exit_code == 0
+    assert "[PROMPT]" not in result.output
+    assert "PROMPT" in result.output
+    docs = _invoke("help")
+    assert "<PROMPT>" in docs.output

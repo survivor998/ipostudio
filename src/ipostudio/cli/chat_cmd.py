@@ -14,7 +14,7 @@ from ipostudio.engines.supervisor import _probe_host
 
 
 @click.command("chat")
-@click.argument("prompt", metavar="[PROMPT]")
+@click.argument("prompt")  # required; usage renders PROMPT, not [PROMPT]
 @click.option("--timeout", "timeout_s", type=float, default=600.0,
               show_default=True,
               help="seconds before the completion gives up (spec §15 local budget)")
