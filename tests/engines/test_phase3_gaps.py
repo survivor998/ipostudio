@@ -274,6 +274,37 @@ def test_probe_identity_deeply_nested_json_is_foreign_not_traceback():
     thread.join(timeout=5)
 
 
+def test_probe_identity_deeply_traversable_document_is_foreign_not_traceback():
+    # re-review residual on the Fix-2 fold: this body PARSES (nesting stays
+    # under the parser's limit and the 1 MiB cap) but the
+    # _document_names_model walk spends several frames per level and
+    # recurses out — the traversal sat outside the except arm, so the
+    # RecursionError still escaped probe_identity as a bare traceback
+    deep = b"[" * 600 + b"]" * 600
+
+    class WalkableTooDeep(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/props":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(deep)))
+                self.end_headers()
+                self.wfile.write(deep)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server, thread = _http_server(WalkableTooDeep)
+    try:
+        host, port = server.server_address
+        assert probe_identity(host, port, "m.gguf", 2.0) == "foreign"
+    finally:
+        server.shutdown()
+    thread.join(timeout=5)
+
+
 def test_start_instance_log_open_failure_marks_failed(tmp_path):
     # the engine log path is blocked by a regular file: start must land a
     # failed row carrying the reason, never a traceback

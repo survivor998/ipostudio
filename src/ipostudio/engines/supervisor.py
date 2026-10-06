@@ -329,11 +329,15 @@ def probe_identity(
     body = raw.decode("utf-8", errors="replace")
     try:
         document = json.loads(body)
+        owned = _document_names_model(document, model_path)
     except (ValueError, RecursionError):
-        # not a props document (RecursionError is not a ValueError): the
-        # refusal verdict must absorb deeply nested payloads too
+        # not a props document, or one too deeply nested to finish parsing
+        # OR WALKING (RecursionError is not a ValueError, and the traversal
+        # spends several frames per level — it can overflow where the parser
+        # did not): the refusal verdict absorbs deeply nested payloads at
+        # both stages
         return "foreign"
-    return "owned" if _document_names_model(document, model_path) else "foreign"
+    return "owned" if owned else "foreign"
 
 def stop_instance(
     conn: sqlite3.Connection,
