@@ -492,7 +492,13 @@ def restart(model_name: str | None, timeout_s: float) -> None:
             except (LookupError, ValueError, ConfigError) as exc:
                 _fail(str(exc))
             model_name = None  # selection persisted; start resolves it
-        stop_instance(conn)
+        stopped = stop_instance(conn)
+        if stopped is not None and stopped["state"] != "stopped":
+            # identity guard refused the kill: report the refusal (the detail
+            # carries the manual-PID guidance) instead of walking into
+            # _run_start's circular "already running" hint — same handling as
+            # `server restart` above
+            _fail(f"stop refused: {stopped['detail']}")
         _run_start(conn, cfg, model_name, None, None, timeout_s)
     finally:
         conn.close()

@@ -229,6 +229,50 @@ def test_stop_and_restart_shorthands(service_env, monkeypatch):
     assert stopped.exit_code == 0
     assert "stopped" in stopped.output
 
+def test_restart_shorthand_reports_stop_refusal_not_circular_hint(
+    service_env, monkeypatch
+):
+    # gstack F1: the restart shorthand ignored stop_instance's return value —
+    # a foreign-identity refusal fell through into _run_start's active check
+    # and produced the circular "use `ipo server restart` to swap models" hint
+    # while losing the refusal's manual-PID guidance.  CLI-seam mirror of
+    # test_stop_shorthand_reports_refusal_on_foreign_identity (engines
+    # phase-3 gaps) for the persisting shorthand: a seeded running row makes
+    # the fall-through deterministic (the prechecks all pass first).
+    from ipostudio.cli import server_cmd
+    from ipostudio.store.database import migrate, open_db
+
+    _patch_fake_engine(monkeypatch)
+    assert _invoke("model", "--select", "tiny-q4").exit_code == 0
+    conn = open_db(service_env / "data" / "app.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO instances (engine, model_name, model_path, host, port, "
+        "pid, state, detail) VALUES ('llama.cpp', 'tiny-q4', "
+        "'tiny-q4.gguf', '127.0.0.1', 18400, 4242, 'running', '')"
+    )
+    conn.commit()
+    conn.close()
+    refusal_detail = (
+        "port answers with a different model document — verify PID 4242 "
+        "manually before any manual termination"
+    )
+    monkeypatch.setattr(
+        server_cmd, "stop_instance",
+        lambda conn, **k: {
+            "state": "running", "model_name": "tiny-q4", "host": "127.0.0.1",
+            "port": 18400, "detail": refusal_detail,
+        },
+    )
+    result = _invoke("restart")
+    assert result.exit_code == 1
+    assert "stop refused" in result.stderr
+    assert "different model document" in result.stderr
+    assert "verify PID 4242" in result.stderr
+    # the circular prompt hint must not replace the refusal detail
+    assert "ipo server restart" not in result.stderr
+
+
 def test_restart_precheck_never_stops_a_healthy_server(service_env, monkeypatch):
     _patch_fake_engine(monkeypatch)
     assert _invoke("model", "--select", "tiny-q4").exit_code == 0
