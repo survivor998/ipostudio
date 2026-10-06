@@ -202,6 +202,23 @@ def test_start_selects_model_then_boots(service_env, monkeypatch):
     assert "tiny-q4" in active.output
     _invoke("stop")
 
+def test_restart_shorthand_swaps_the_served_model(service_env, monkeypatch):
+    # characterization (independent review Important-1), no red phase by
+    # design: the swap chain is `activate_model` mutating the in-memory cfg
+    # through ConfigStore.set, then `model_name = None` re-resolving inside
+    # _run_start — a lazy-write refactor of set() would silently keep serving
+    # model A with zero failing tests.  This pins model B on both surfaces.
+    _patch_fake_engine(monkeypatch)
+    (service_env / "models" / "tiny-q2.gguf").write_bytes(GGUF + b"\x00" * 36)
+    assert _invoke("start", "--model", "tiny-q4", "--timeout", "20").exit_code == 0
+    swapped = _invoke("restart", "--model", "tiny-q2", "--timeout", "20")
+    assert swapped.exit_code == 0, swapped.stderr
+    info = json.loads(_invoke("server", "info", "--json").output)
+    assert info["instance"]["model_name"] == "tiny-q2"
+    selection = json.loads(_invoke("model", "--json").output)
+    assert selection["active"] == "tiny-q2"
+    _invoke("stop")
+
 def test_reserved_flags_fail_with_plan_pointers(tmp_path, monkeypatch):
     monkeypatch.setenv("IPO_DATA_DIR", str(tmp_path))
     cloud = _invoke("start", "--cloud")
